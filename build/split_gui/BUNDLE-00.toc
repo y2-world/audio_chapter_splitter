@@ -1,0 +1,3 @@
+([('split_gui',
+   '/Users/yukiyoshida/Desktop/audio_chapter_splitter/dist/split_gui',
+   'EXECUTABLE')],)
