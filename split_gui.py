@@ -4,11 +4,29 @@ import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-
 import re
 
 def clean_title(title):
     return re.sub(r"^\d+\.\s*", "", title)
+
+def parse_time_to_ms(time_str):
+    if not re.match(r'^\d{1,2}:\d{2}(:\d{2})?$', time_str):
+        raise ValueError(f"不正な時間形式: {time_str}")
+    parts = list(map(int, time_str.split(":")))
+    if len(parts) == 3:
+        return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000
+    elif len(parts) == 2:
+        return (parts[0] * 60 + parts[1]) * 1000
+    return 0
+
+def format_ms(ms):
+    return f"{ms / 1000.0:.6f}"
+
+def get_ffmpeg_path():
+    for path in ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "ffmpeg"]:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return "ffmpeg"
 
 root = tk.Tk()
 root.title("オーディオチャプター分割ツール")
@@ -32,17 +50,6 @@ def log(msg):
     output_box.see(tk.END)
     root.update_idletasks()
 
-def parse_time_to_ms(time_str):
-    parts = list(map(int, time_str.split(":")))
-    if len(parts) == 3:
-        return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000
-    elif len(parts) == 2:
-        return (parts[0] * 60 + parts[1]) * 1000
-    return 0
-
-def format_ms(ms):
-    return f"{ms / 1000.0:.6f}"
-
 def convert_text_to_json():
     input_text = text_input.get("1.0", tk.END).strip()
     lines = [line for line in input_text.splitlines() if line.strip()]
@@ -51,29 +58,33 @@ def convert_text_to_json():
         messagebox.showwarning("警告", "テキストを入力してください。")
         return
 
-    chapters = []
     final_end = None
     final_end_line = None
 
-    for i, line in enumerate(lines):
-        words = line.strip().split()
-        if len(words) >= 2 and words[-2].upper() == "END":
-            time_part = words[-1]
-            final_end = parse_time_to_ms(time_part)
-            final_end_line = i
-            break
+    try:
+        for i, line in enumerate(lines):
+            words = line.strip().split()
+            if len(words) >= 2 and words[-2].upper() == "END":
+                time_part = words[-1]
+                final_end = parse_time_to_ms(time_part)
+                final_end_line = i
+                break
 
-    parsed = []
-    for idx, line in enumerate(lines):
-        if idx == final_end_line:
-            continue
-        parts = line.strip().rsplit(" ", 1)
-        if len(parts) != 2:
-            continue
-        title, time_str = parts
-        start_ms = parse_time_to_ms(time_str)
-        parsed.append((idx, title.strip(), start_ms))
+        parsed = []
+        for idx, line in enumerate(lines):
+            if idx == final_end_line:
+                continue
+            parts = line.strip().rsplit(" ", 1)
+            if len(parts) != 2:
+                raise ValueError(f"無効な行の形式: {line}")
+            title, time_str = parts
+            start_ms = parse_time_to_ms(time_str)
+            parsed.append((idx, title.strip(), start_ms))
+    except ValueError as ve:
+        messagebox.showerror("エラー", f"テキストの形式が正しくありません:\n{ve}")
+        return
 
+    chapters = []
     for i, (cid, title, start_ms) in enumerate(parsed):
         end_ms = parsed[i + 1][2] if i + 1 < len(parsed) else final_end or start_ms
         chapters.append({
@@ -97,13 +108,6 @@ def convert_text_to_json():
         messagebox.showinfo("成功", f"JSONを書き出しました:\n{save_path}")
         log(f"✅ JSON書き出し成功: {save_path}")
 
-# macOSなどでffmpegのパスを探す（環境によって違うので適宜書き換え）
-def get_ffmpeg_path():
-    for path in ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "ffmpeg"]:
-        if os.path.exists(path) and os.access(path, os.X_OK):
-            return path
-    return "ffmpeg"  # PATHにあると仮定して最後に返す
-
 def split_audio_fast():
     def run():
         audio_path = filedialog.askopenfilename(
@@ -120,9 +124,11 @@ def split_audio_fast():
         if not json_path:
             return
 
-        output_dir = filedialog.askdirectory(title="分割ファイルの保存先フォルダを選択")
-        if not output_dir:
-            return
+        audio_filename = os.path.splitext(os.path.basename(audio_path))[0]
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        output_dir = os.path.join(desktop_path, audio_filename)
+        os.makedirs(output_dir, exist_ok=True)
+        log(f"💾 出力先: {output_dir}")
 
         ffmpeg_path = get_ffmpeg_path()
         log(f"▶ ffmpeg path: {ffmpeg_path}")
@@ -136,8 +142,7 @@ def split_audio_fast():
             start = chapter["start_time"]
             end = chapter["end_time"]
             title = chapter.get("tags", {}).get("title", "chapter")
-            safe_title = title.replace(" ", "_").replace("/", "_")
-
+            safe_title = title.replace(" ", "_").replace("/", "_")[:50]
             chapter_id = chapter.get("id", 0)
             track_number = chapter_id + 1
 
