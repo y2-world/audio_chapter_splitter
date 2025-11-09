@@ -1,7 +1,9 @@
 import json
 import os
 import subprocess
+import sys
 import threading
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import re
@@ -28,9 +30,52 @@ def get_ffmpeg_path():
             return path
     return "ffmpeg"
 
-root = tk.Tk()
-root.title("オーディオチャプター分割ツール")
-root.geometry("600x750")
+def get_ffprobe_path():
+    for path in ["/usr/local/bin/ffprobe", "/opt/homebrew/bin/ffprobe", "ffprobe"]:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return "ffprobe"
+
+# アプリケーションのエラーハンドリング
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    
+    error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    print(f"エラーが発生しました:\n{error_msg}", file=sys.stderr)
+    
+    # GUIが利用可能な場合は、エラーダイアログを表示
+    try:
+        import tkinter.messagebox as mb
+        mb.showerror("エラー", f"アプリケーションエラーが発生しました:\n\n{str(exc_value)}\n\n詳細はコンソールを確認してください。")
+    except:
+        pass
+
+sys.excepthook = handle_exception
+
+try:
+    root = tk.Tk()
+    root.title("チャプター分割ツール")
+    root.geometry("600x750")
+except Exception as e:
+    print(f"GUIの初期化に失敗しました: {e}", file=sys.stderr)
+    import tkinter.messagebox as mb
+    mb.showerror("エラー", f"アプリケーションの起動に失敗しました:\n{e}")
+    sys.exit(1)
+
+# macOSでウィンドウを前面に表示
+root.lift()
+root.attributes('-topmost', True)
+root.after_idle(root.attributes, '-topmost', False)
+
+# 処理停止フラグ
+stop_flag = False
+
+def stop_processing():
+    global stop_flag
+    stop_flag = True
+    log("⚠️ 処理を中断します...")
 
 progress_var = tk.DoubleVar()
 progress_bar = ttk.Progressbar(root, variable=progress_var, maximum=100)
@@ -99,46 +144,281 @@ def convert_text_to_json():
 
     output = {"chapters": chapters}
 
-    save_path = filedialog.asksaveasfilename(
-        defaultextension=".json", filetypes=[("JSON files", "*.json")]
+    # JSONファイルの保存先を選択
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    json_path = filedialog.asksaveasfilename(
+        title="JSONファイルを保存",
+        initialdir=desktop_path,
+        initialfile="chapters.json",
+        defaultextension=".json",
+        filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
     )
-    if save_path:
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
-        messagebox.showinfo("成功", f"JSONを書き出しました:\n{save_path}")
-        log(f"✅ JSON書き出し成功: {save_path}")
+
+    if not json_path:
+        return
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    messagebox.showinfo("成功", f"JSONを保存しました:\n{os.path.basename(json_path)}")
+    log(f"✅ JSON書き出し成功: {json_path}")
+
+def extract_chapters_from_video():
+    def run():
+        video_path = filedialog.askopenfilename(
+            title="動画ファイルを選択",
+            filetypes=[
+                ("Video files", "*.mp4 *.mov *.avi *.mkv *.m4v"),
+                ("All files", "*.*")
+            ]
+        )
+        if not video_path:
+            return
+
+        ffprobe_path = get_ffprobe_path()
+        log(f"▶ ffprobe path: {ffprobe_path}")
+        log(f"📹 動画ファイル: {video_path}")
+
+        # ffprobeでチャプター情報を抽出
+        cmd = [
+            ffprobe_path, "-i", video_path,
+            "-print_format", "json",
+            "-show_chapters",
+            "-loglevel", "error"
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+            )
+            stdout, stderr = process.communicate()
+
+            if process.returncode != 0:
+                error_msg = stderr.strip() if stderr else "エラーが発生しました"
+                messagebox.showerror("エラー", f"ffprobeの実行に失敗しました:\n{error_msg}")
+                log(f"❌ エラー: {error_msg}")
+                return
+
+            # JSONをパース
+            data = json.loads(stdout)
+            chapters = data.get("chapters", [])
+
+            if not chapters:
+                messagebox.showwarning("警告", "この動画ファイルにはチャプター情報が含まれていません。")
+                log("⚠️ チャプター情報が見つかりませんでした")
+                return
+
+            log(f"✅ {len(chapters)}個のチャプターを検出しました")
+
+            # JSONファイルの保存先を選択
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            json_path = filedialog.asksaveasfilename(
+                title="JSONファイルを保存",
+                initialdir=desktop_path,
+                initialfile="chapters.json",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+
+            if not json_path:
+                return
+
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            messagebox.showinfo("成功", f"チャプター情報を保存しました:\n{os.path.basename(json_path)}\n（{len(chapters)}個のチャプター）")
+            log(f"✅ JSON書き出し成功: {json_path}")
+            log(f"📊 チャプター数: {len(chapters)}")
+
+        except json.JSONDecodeError as e:
+            messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
+            log(f"❌ JSON解析エラー: {e}")
+        except Exception as e:
+            messagebox.showerror("エラー", f"エラーが発生しました:\n{e}")
+            log(f"❌ エラー: {e}")
+
+    threading.Thread(target=run).start()
 
 def split_audio_fast():
     def run():
-        audio_path = filedialog.askopenfilename(
-            title="音声ファイルを選択",
-            filetypes=[("Audio files", "*.m4a *.mp3 *.wav"), ("All files", "*.*")]
+        media_path = filedialog.askopenfilename(
+            title="音声ファイルまたは動画ファイルを選択",
+            filetypes=[
+                ("Audio files", "*.m4a *.mp3 *.wav"),
+                ("Video files", "*.mp4 *.mov *.avi *.mkv"),
+                ("All files", "*.*")
+            ]
         )
-        if not audio_path:
+        if not media_path:
             return
 
-        json_path = filedialog.askopenfilename(
-            title="チャプターJSONファイルを選択",
-            filetypes=[("JSON files", "*.json")]
-        )
-        if not json_path:
-            return
+        # ファイルの拡張子で動画か音声かを判定
+        ext = os.path.splitext(media_path)[1].lower()
+        is_video = ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.webm', '.m4v']
 
-        audio_filename = os.path.splitext(os.path.basename(audio_path))[0]
+        log(f"📹 選択されたファイル: {media_path}")
+        log(f"📋 ファイルタイプ: {'動画' if is_video else '音声'}")
+
+        # 動画ファイルの場合は、動画からチャプター情報を自動抽出
+        if is_video:
+            ffprobe_path = get_ffprobe_path()
+            log(f"▶ ffprobe path: {ffprobe_path}")
+            log("📊 動画からチャプター情報を抽出中...")
+
+            cmd = [
+                ffprobe_path, "-i", media_path,
+                "-print_format", "json",
+                "-show_chapters",
+                "-loglevel", "error"
+            ]
+
+            try:
+                process = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+                )
+                stdout, stderr = process.communicate()
+
+                if process.returncode != 0:
+                    error_msg = stderr.strip() if stderr else "エラーが発生しました"
+                    messagebox.showerror("エラー", f"チャプター情報の抽出に失敗しました:\n{error_msg}")
+                    log(f"❌ エラー: {error_msg}")
+                    return
+
+                # JSONをパース
+                data = json.loads(stdout)
+                chapters = data.get("chapters", [])
+
+                if not chapters:
+                    messagebox.showerror("エラー", "この動画ファイルにはチャプター情報が含まれていません。")
+                    log("❌ チャプター情報が見つかりませんでした")
+                    return
+
+                log(f"✅ {len(chapters)}個のチャプターを検出しました")
+
+            except json.JSONDecodeError as e:
+                messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
+                log(f"❌ JSON解析エラー: {e}")
+                return
+            except Exception as e:
+                messagebox.showerror("エラー", f"エラーが発生しました:\n{e}")
+                log(f"❌ エラー: {e}")
+                return
+
+        else:
+            # 音声ファイルの場合は、JSONファイルを選択
+            json_path = filedialog.askopenfilename(
+                title="チャプターJSONファイルを選択",
+                filetypes=[("JSON files", "*.json")],
+                initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+            )
+            if not json_path:
+                return
+            log(f"📄 JSONファイル: {json_path}")
+
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            chapters = data.get("chapters", [])
+
+        media_filename = os.path.splitext(os.path.basename(media_path))[0]
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        output_dir = os.path.join(desktop_path, audio_filename)
+        output_dir = os.path.join(desktop_path, media_filename)
         os.makedirs(output_dir, exist_ok=True)
         log(f"💾 出力先: {output_dir}")
 
         ffmpeg_path = get_ffmpeg_path()
+        ffprobe_path = get_ffprobe_path()
         log(f"▶ ffmpeg path: {ffmpeg_path}")
 
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        # 元のファイルからメタデータを取得
+        metadata = {}
+        try:
+            cmd_metadata = [
+                ffprobe_path, "-i", media_path,
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                "-loglevel", "error"
+            ]
+            process_metadata = subprocess.Popen(
+                cmd_metadata, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+            )
+            stdout_metadata, stderr_metadata = process_metadata.communicate()
+            if process_metadata.returncode == 0:
+                format_data = json.loads(stdout_metadata)
 
-        chapters = data.get("chapters", [])
+                # formatタグとストリームタグの両方を確認
+                all_tags = {}
+                format_tags = format_data.get("format", {}).get("tags", {})
+                all_tags.update(format_tags)
+
+                # ストリームタグも確認（特に音声ストリーム）
+                streams = format_data.get("streams", [])
+                for stream in streams:
+                    if stream.get("codec_type") == "audio":
+                        stream_tags = stream.get("tags", {})
+                        all_tags.update(stream_tags)
+                        break
+
+                log(f"🔍 検出されたメタデータタグ: {list(all_tags.keys())}")
+
+                # 継承するメタデータのマッピング定義
+                metadata_mapping = {
+                    "album": ["album", "ALBUM", "Album", "©alb"],
+                    "artist": ["artist", "ARTIST", "Artist", "©ART", "album_artist", "ALBUM_ARTIST"],
+                    "album_artist": ["album_artist", "ALBUM_ARTIST", "albumartist"],
+                    "genre": ["genre", "GENRE", "Genre", "©gen"],
+                    "date": ["date", "DATE", "Date", "year", "YEAR", "©day"],
+                    "composer": ["composer", "COMPOSER", "Composer", "©wrt"],
+                    "comment": ["comment", "COMMENT", "Comment", "©cmt"],
+                    "copyright": ["copyright", "COPYRIGHT", "Copyright", "©cpy"],
+                    "publisher": ["publisher", "PUBLISHER", "Publisher", "label"],
+                    "description": ["description", "DESCRIPTION", "Description"],
+                }
+
+                # 各メタデータを検索して取得
+                for meta_key, possible_keys in metadata_mapping.items():
+                    for key in possible_keys:
+                        if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
+                            metadata[meta_key] = str(all_tags[key]).strip()
+                            log(f"  📌 {meta_key}: {metadata[meta_key]}")
+                            break
+
+                # 動画ファイルの場合、元のファイルのタイトルをアルバムタイトルとして設定
+                if is_video:
+                    # 動画のタイトルタグを取得
+                    video_title = None
+                    for key in ["title", "TITLE", "Title", "©nam"]:
+                        if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
+                            video_title = str(all_tags[key]).strip()
+                            break
+
+                    # タイトルが見つかった場合、それをアルバムタイトルとして設定
+                    if video_title:
+                        metadata["album"] = video_title
+                        log(f"  🎬 動画タイトルをアルバムに設定: {video_title}")
+                    # タイトルタグがない場合はファイル名をアルバムタイトルとして使用
+                    else:
+                        metadata["album"] = media_filename
+                        log(f"  📁 ファイル名をアルバムに設定: {media_filename}")
+
+                if metadata:
+                    log(f"📋 継承するメタデータ: {list(metadata.keys())}")
+                else:
+                    log(f"⚠️ メタデータが見つかりませんでした")
+        except Exception as e:
+            log(f"⚠️ メタデータの取得に失敗（継続します）: {e}")
 
         for i, chapter in enumerate(chapters):
+            # 停止フラグをチェック
+            global stop_flag
+            if stop_flag:
+                log("❌ 処理が中断されました")
+                messagebox.showwarning("中断", "処理を中断しました。")
+                stop_flag = False
+                current_label.config(text="処理が中断されました")
+                progress_var.set(0)
+                return
+
             start = chapter["start_time"]
             end = chapter["end_time"]
             title = chapter.get("tags", {}).get("title", "chapter")
@@ -146,19 +426,32 @@ def split_audio_fast():
             chapter_id = chapter.get("id", 0)
             track_number = chapter_id + 1
 
-            ext = os.path.splitext(audio_path)[1]
-            output_file = os.path.join(output_dir, f"{track_number:02d}_{safe_title}{ext}")
+            # 出力ファイルは常にm4a形式
+            output_file = os.path.join(output_dir, f"{track_number:02d}_{safe_title}.m4a")
 
+            # 動画の場合は音声のみを抽出、音声の場合はそのまま処理
+            # コピーモードで再エンコードなし（高速処理）
             cmd = [
-                ffmpeg_path, "-y", "-i", audio_path,
+                ffmpeg_path, "-y", "-i", media_path,
                 "-ss", start,
                 "-to", end,
                 "-vn",
                 "-c:a", "copy",
+            ]
+
+            # メタデータをクリアしてから設定
+            cmd.extend(["-map_metadata", "-1"])
+
+            # 取得したメタデータを明示的に設定
+            for meta_key, meta_value in metadata.items():
+                cmd.extend(["-metadata", f"{meta_key}={meta_value}"])
+
+            # チャプターごとのタイトルとトラック番号を設定
+            cmd.extend([
                 "-metadata", f"title={title}",
                 "-metadata", f"track={track_number}",
                 output_file
-            ]
+            ])
 
             log(f"▶️ {track_number}: {title}")
             current_label.config(text=f"現在のチャプター: {track_number} - {title}")
@@ -185,7 +478,19 @@ def split_audio_fast():
 btn_convert = tk.Button(root, text="📝 テキスト → JSON変換", command=convert_text_to_json)
 btn_convert.pack(fill="x", padx=10, pady=5)
 
-btn_split = tk.Button(root, text="🎧 JSON + 音声 → 分割（高速版）", command=split_audio_fast)
-btn_split.pack(fill="x", padx=10, pady=10)
+btn_extract = tk.Button(root, text="🎬 動画からチャプター抽出", command=extract_chapters_from_video)
+btn_extract.pack(fill="x", padx=10, pady=5)
 
-root.mainloop()
+btn_split = tk.Button(root, text="🎬 動画/音声 → 分割", command=split_audio_fast)
+btn_split.pack(fill="x", padx=10, pady=5)
+
+btn_stop = tk.Button(root, text="⛔ 処理を中断", command=stop_processing)
+btn_stop.pack(fill="x", padx=10, pady=5)
+
+try:
+    root.mainloop()
+except Exception as e:
+    print(f"アプリケーション実行中のエラー: {e}", file=sys.stderr)
+    import tkinter.messagebox as mb
+    mb.showerror("エラー", f"アプリケーション実行中のエラーが発生しました:\n{e}")
+    sys.exit(1)
