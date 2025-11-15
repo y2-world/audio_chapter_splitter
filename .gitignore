@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# PyInstaller
+*.app

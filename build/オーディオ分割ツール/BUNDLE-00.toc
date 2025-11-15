@@ -1,3 +1,0 @@
-([('オーディオ分割ツール',
-   '/Users/yukiyoshida/Desktop/audio_chapter_splitter/dist/オーディオ分割ツール',
-   'EXECUTABLE')],)
