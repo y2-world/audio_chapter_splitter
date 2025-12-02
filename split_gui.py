@@ -430,13 +430,15 @@ def split_audio_fast():
             output_file = os.path.join(output_dir, f"{track_number:02d}_{safe_title}.m4a")
 
             # 動画の場合は音声のみを抽出、音声の場合はそのまま処理
-            # コピーモードで再エンコードなし（高速処理）
+            # 高品質AACエンコード（途切れのない正確な分割）
             cmd = [
                 ffmpeg_path, "-y", "-i", media_path,
-                "-ss", start,
+                "-ss", start,  # 入力ファイルの後で精度の高いシーク
                 "-to", end,
                 "-vn",
-                "-c:a", "copy",
+                "-c:a", "aac",  # 再エンコードで正確な分割
+                "-b:a", "256k",  # 高品質ビットレート
+                "-f", "mp4",  # MP4コンテナを明示
             ]
 
             # メタデータをクリアしてから設定
