@@ -435,9 +435,12 @@ def split_audio_fast():
                 ffmpeg_path, "-y", "-i", media_path,
                 "-ss", start,  # 入力ファイルの後で精度の高いシーク
                 "-to", end,
-                "-vn",
+                "-map", "0:a",  # 音声ストリームをマッピング
+                "-map", "0:v?",  # アートワーク（存在する場合のみ）をマッピング
                 "-c:a", "aac",  # 再エンコードで正確な分割
                 "-b:a", "256k",  # 高品質ビットレート
+                "-c:v", "copy",  # アートワークをコピー
+                "-disposition:v:0", "attached_pic",  # アートワークとして設定
                 "-f", "mp4",  # MP4コンテナを明示
             ]
 
