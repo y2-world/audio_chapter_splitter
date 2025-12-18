@@ -188,7 +188,7 @@ def extract_chapters_from_video():
 
         try:
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
             )
             stdout, stderr = process.communicate()
 
@@ -273,7 +273,7 @@ def split_audio_fast():
 
             try:
                 process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
                 )
                 stdout, stderr = process.communicate()
 
@@ -340,7 +340,7 @@ def split_audio_fast():
                 "-loglevel", "error"
             ]
             process_metadata = subprocess.Popen(
-                cmd_metadata, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
+                cmd_metadata, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
             )
             stdout_metadata, stderr_metadata = process_metadata.communicate()
             if process_metadata.returncode == 0:
@@ -432,9 +432,10 @@ def split_audio_fast():
             # 動画の場合は音声のみを抽出、音声の場合はそのまま処理
             # 高品質AACエンコード（途切れのない正確な分割）
             cmd = [
-                ffmpeg_path, "-y", "-i", media_path,
-                "-ss", start,  # 入力ファイルの後で精度の高いシーク
+                ffmpeg_path, "-y",
+                "-ss", start,  # 入力ファイルの前で高速シーク（アートワーク継承に必須）
                 "-to", end,
+                "-i", media_path,
                 "-map", "0:a",  # 音声ストリームをマッピング
                 "-map", "0:v?",  # アートワーク（存在する場合のみ）をマッピング
                 "-c:a", "aac",  # 再エンコードで正確な分割
@@ -462,7 +463,7 @@ def split_audio_fast():
             current_label.config(text=f"現在のチャプター: {track_number} - {title}")
 
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace'
             )
             for line in process.stdout:
                 if line.strip():

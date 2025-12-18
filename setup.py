@@ -3,15 +3,8 @@ from setuptools import setup
 APP = ['split_gui.py']
 DATA_FILES = []
 OPTIONS = {
-    'argv_emulation': True,
-    'packages': ['tkinter'],
-    'iconfile': None,
-    'excludes': ['setuptools', 'pkg_resources'],
-    'strip': False,  # strip処理を無効化して権限エラーを回避
-    'semi_standalone': False,  # 完全スタンドアロンモード
-    'site_packages': False,  # システムのsite-packagesを使わない
     'plist': {
-        'CFBundleName': 'AudioChapterSplitter',
+        'CFBundleName': 'チャプター分割ツール',
         'CFBundleDisplayName': 'チャプター分割ツール',
         'CFBundleGetInfoString': "動画・音声ファイルをチャプターごとに分割",
         'CFBundleIdentifier': "com.audiochaptersplitter.app",
