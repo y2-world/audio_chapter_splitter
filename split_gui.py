@@ -408,6 +408,9 @@ def split_audio_fast():
         except Exception as e:
             log(f"⚠️ メタデータの取得に失敗（継続します）: {e}")
 
+        # 出力ファイルのリストを保存（音声ファイルの場合、後でアートワークを追加）
+        output_files = []
+
         for i, chapter in enumerate(chapters):
             # 停止フラグをチェック
             global stop_flag
@@ -428,6 +431,7 @@ def split_audio_fast():
 
             # 出力ファイルは常にm4a形式
             output_file = os.path.join(output_dir, f"{track_number:02d}_{safe_title}.m4a")
+            output_files.append(output_file)
 
             # 動画の場合は音声のみを抽出、音声の場合はそのまま処理
             # 高品質AACエンコード（途切れのない正確な分割）
@@ -454,8 +458,7 @@ def split_audio_fast():
                 "-b:a", "256k",  # 高品質ビットレート
             ])
 
-            # 動画・音声ファイル共通：アートワーク（attached_pic）を含める
-            # メインのビデオストリームは除外し、attached_picのみを選択
+            # 動画の場合のみアートワークを含める（音声は後で一斉に追加）
             if is_video:
                 # 動画の場合：ストリーム#0:2以降がattached_pic（#0:0はメインビデオ、#0:1は音声）
                 cmd.extend([
@@ -463,13 +466,6 @@ def split_audio_fast():
                     "-map", "0:v:2?",  # 3番目のビデオストリーム（attached_pic）
                     "-c:v", "copy",  # アートワークをコピー
                     "-disposition:v", "attached_pic",  # アートワークとして設定
-                ])
-            else:
-                # 音声ファイルの場合：すべてのビデオストリームがattached_pic
-                cmd.extend([
-                    "-map", "0:v?",  # アートワーク（存在する場合のみ）
-                    "-c:v", "copy",  # アートワークをコピー
-                    "-disposition:v:0", "attached_pic",  # アートワークとして設定
                 ])
 
             cmd.extend(["-f", "mp4"])  # MP4コンテナを明示
@@ -508,6 +504,44 @@ def split_audio_fast():
             progress = ((i + 1) / len(chapters)) * 100
             progress_var.set(progress)
             root.update_idletasks()
+
+        # 音声ファイルの場合、分割後に一斉にアートワークを追加
+        if not is_video and output_files:
+            log("🎨 アートワークを追加中...")
+            current_label.config(text="アートワークを追加中...")
+
+            for idx, output_file in enumerate(output_files):
+                temp_file = output_file + ".temp.m4a"
+
+                artwork_cmd = [
+                    ffmpeg_path, "-y",
+                    "-i", output_file,  # 分割済みファイル
+                    "-i", media_path,   # 元のファイル（アートワーク取得用）
+                    "-map", "0:a",      # 分割済みファイルの音声
+                    "-map", "1:v?",     # 元のファイルのアートワーク
+                    "-c:a", "copy",     # 音声はコピー
+                    "-c:v", "copy",     # アートワークもコピー
+                    "-disposition:v:0", "attached_pic",
+                    "-map_metadata", "0",  # 分割済みファイルのメタデータを保持
+                    temp_file
+                ]
+
+                process = subprocess.Popen(
+                    artwork_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace'
+                )
+                process.wait()
+
+                if process.returncode == 0:
+                    os.replace(temp_file, output_file)
+                    log(f"  ✅ {os.path.basename(output_file)}")
+                else:
+                    log(f"  ⚠️ {os.path.basename(output_file)} - アートワーク追加失敗")
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+
+                progress = ((idx + 1) / len(output_files)) * 100
+                progress_var.set(progress)
+                root.update_idletasks()
 
         messagebox.showinfo("完了", "チャプター分割が完了しました。")
         log("✅ 分割完了")
