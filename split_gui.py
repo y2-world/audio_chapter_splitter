@@ -436,14 +436,34 @@ def split_audio_fast():
                 "-ss", start,  # 入力ファイルの前で高速シーク（アートワーク継承に必須）
                 "-to", end,
                 "-i", media_path,
-                "-map", "0:a",  # 音声ストリームをマッピング
-                "-map", "0:v?",  # アートワーク（存在する場合のみ）をマッピング
+            ]
+
+            # 音声とアートワーク（attached_pic）を抽出
+            cmd.extend([
+                "-map", "0:a:0",  # 最初の音声ストリームのみ
                 "-c:a", "aac",  # 再エンコードで正確な分割
                 "-b:a", "256k",  # 高品質ビットレート
-                "-c:v", "copy",  # アートワークをコピー
-                "-disposition:v:0", "attached_pic",  # アートワークとして設定
-                "-f", "mp4",  # MP4コンテナを明示
-            ]
+            ])
+
+            # 動画・音声ファイル共通：アートワーク（attached_pic）を含める
+            # メインのビデオストリームは除外し、attached_picのみを選択
+            if is_video:
+                # 動画の場合：ストリーム#0:2以降がattached_pic（#0:0はメインビデオ、#0:1は音声）
+                cmd.extend([
+                    "-map", "0:v:1?",  # 2番目のビデオストリーム（attached_pic）
+                    "-map", "0:v:2?",  # 3番目のビデオストリーム（attached_pic）
+                    "-c:v", "copy",  # アートワークをコピー
+                    "-disposition:v", "attached_pic",  # アートワークとして設定
+                ])
+            else:
+                # 音声ファイルの場合：すべてのビデオストリームがattached_pic
+                cmd.extend([
+                    "-map", "0:v?",  # アートワーク（存在する場合のみ）
+                    "-c:v", "copy",  # アートワークをコピー
+                    "-disposition:v:0", "attached_pic",  # アートワークとして設定
+                ])
+
+            cmd.extend(["-f", "mp4"])  # MP4コンテナを明示
 
             # メタデータをクリアしてから設定
             cmd.extend(["-map_metadata", "-1"])
@@ -469,6 +489,12 @@ def split_audio_fast():
                 if line.strip():
                     log(line.strip())
             process.wait()
+
+            # エラーチェック
+            if process.returncode != 0:
+                log(f"❌ ffmpegがエラーコード{process.returncode}で終了しました")
+                messagebox.showerror("エラー", f"チャプター{track_number}の処理に失敗しました")
+                return
 
             progress = ((i + 1) / len(chapters)) * 100
             progress_var.set(progress)
