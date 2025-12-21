@@ -431,14 +431,23 @@ def split_audio_fast():
 
             # 動画の場合は音声のみを抽出、音声の場合はそのまま処理
             # 高品質AACエンコード（途切れのない正確な分割）
-            cmd = [
-                ffmpeg_path, "-y",
-                "-ss", start,  # 入力ファイルの前で高速シーク（アートワーク継承に必須）
-                "-to", end,
-                "-i", media_path,
-            ]
+            if is_video:
+                # 動画：-ss/-toを-iの前に配置（アートワーク継承に必須）
+                cmd = [
+                    ffmpeg_path, "-y",
+                    "-ss", start,
+                    "-to", end,
+                    "-i", media_path,
+                ]
+            else:
+                # 音声：-ss/-toを-iの後に配置（0057704の方法で途切れ防止）
+                cmd = [
+                    ffmpeg_path, "-y", "-i", media_path,
+                    "-ss", start,
+                    "-to", end,
+                ]
 
-            # 音声とアートワーク（attached_pic）を抽出
+            # 音声ストリームのマッピング
             cmd.extend([
                 "-map", "0:a:0",  # 最初の音声ストリームのみ
                 "-c:a", "aac",  # 再エンコードで正確な分割
