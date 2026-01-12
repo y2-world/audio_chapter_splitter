@@ -288,11 +288,35 @@ def split_audio_fast():
                 chapters = data.get("chapters", [])
 
                 if not chapters:
-                    messagebox.showerror("エラー", "この動画ファイルにはチャプター情報が含まれていません。")
-                    log("❌ チャプター情報が見つかりませんでした")
-                    return
+                    log("⚠️ 動画にチャプター情報が見つかりませんでした")
+                    # JSONファイルを選択するか確認
+                    if messagebox.askyesno("チャプター情報なし",
+                                          "この動画ファイルにはチャプター情報が含まれていません。\n\nJSONファイルを選択して分割しますか？"):
+                        # JSONファイルを選択
+                        json_path = filedialog.askopenfilename(
+                            title="チャプターJSONファイルを選択",
+                            filetypes=[("JSON files", "*.json")],
+                            initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+                        )
+                        if not json_path:
+                            log("❌ JSONファイルが選択されませんでした")
+                            return
 
-                log(f"✅ {len(chapters)}個のチャプターを検出しました")
+                        log(f"📄 JSONファイル: {json_path}")
+                        with open(json_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        chapters = data.get("chapters", [])
+
+                        if not chapters:
+                            messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+                            log("❌ JSONファイルにチャプター情報がありません")
+                            return
+                        log(f"✅ JSONから{len(chapters)}個のチャプターを読み込みました")
+                    else:
+                        log("❌ 処理をキャンセルしました")
+                        return
+                else:
+                    log(f"✅ {len(chapters)}個のチャプターを検出しました")
 
             except json.JSONDecodeError as e:
                 messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
