@@ -8,6 +8,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import re
 
+# Tk 9.0以降では明示的な色指定で十分対応可能
+
 def clean_title(title):
     return re.sub(r"^\d+\.\s*", "", title)
 
@@ -56,8 +58,15 @@ sys.excepthook = handle_exception
 
 try:
     root = tk.Tk()
+
+    # Tkのデフォルトオプションを設定（テキストウィジェットのみ）
+    root.option_add('*Text*background', 'white')
+    root.option_add('*Text*foreground', 'black')
+    root.option_add('*Text*insertBackground', 'black')
+
     root.title("チャプター分割ツール")
     root.geometry("600x750")
+
 except Exception as e:
     print(f"GUIの初期化に失敗しました: {e}", file=sys.stderr)
     import tkinter.messagebox as mb
@@ -84,10 +93,10 @@ progress_bar.pack(fill="x", padx=10, pady=10)
 current_label = tk.Label(root, text="現在のチャプター: 未処理")
 current_label.pack(padx=10, pady=(0, 5))
 
-output_box = scrolledtext.ScrolledText(root, wrap="word", height=12)
+output_box = scrolledtext.ScrolledText(root, wrap="word", height=12, bg="white", fg="black", insertbackground="black")
 output_box.pack(padx=10, pady=10, fill="both", expand=True)
 
-text_input = scrolledtext.ScrolledText(root, wrap="word", height=12)
+text_input = scrolledtext.ScrolledText(root, wrap="word", height=12, bg="white", fg="black", insertbackground="black")
 text_input.pack(padx=10, pady=(10, 5), fill="both", expand=True)
 
 def log(msg):
