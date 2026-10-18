@@ -1,11 +1,18 @@
 from setuptools import setup
+import glob
 import os
+import tkinter
 
 # コード署名を無効化
 os.environ['CODESIGN_ALLOCATE'] = '/usr/bin/true'
 
+# ビルドに使うPythonのTcl/Tkライブラリ（init.tcl、tk.tcl等）をContents/Resourcesに同梱する
+# py2appはdylibしかコピーしないため、これが無いとHomebrewが入っていないMacで起動できない
+TCL_LIBRARY = tkinter.Tcl().eval('info library')
+TK_LIBRARY = glob.glob(os.path.join(os.path.dirname(TCL_LIBRARY), 'tk[0-9]*'))[0]
+
 APP = ['split_gui.py']
-DATA_FILES = []
+DATA_FILES = [TCL_LIBRARY, TK_LIBRARY]
 OPTIONS = {
     'argv_emulation': False,
     'packages': ['tkinter'],
@@ -16,10 +23,10 @@ OPTIONS = {
         'CFBundleDisplayName': 'チャプター分割ツール',
         'CFBundleGetInfoString': "動画・音声ファイルをチャプターごとに分割",
         'CFBundleIdentifier': "com.audiochaptersplitter.app",
-        'CFBundleVersion': "1.0.3",
-        'CFBundleShortVersionString': "1.0.3",
+        'CFBundleVersion': "1.0.6",
+        'CFBundleShortVersionString': "1.0.6",
         'NSHighResolutionCapable': True,
-        'LSMinimumSystemVersion': '10.13.0',
+        'LSMinimumSystemVersion': '26.0',
         'NSAppearance': 'NSAppearanceNameAqua',
     },
     'emulate_shell_environment': True,

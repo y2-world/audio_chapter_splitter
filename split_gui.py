@@ -1,9 +1,18 @@
+import glob
 import json
 import os
 import subprocess
 import sys
 import threading
 import traceback
+
+# py2appでバンドルされた場合、同梱したTcl/Tkライブラリを使う（Homebrewが無いMacでも起動するため）
+if getattr(sys, 'frozen', False) and os.environ.get('RESOURCEPATH'):
+    for env_name, pattern in [('TCL_LIBRARY', 'tcl[0-9]*'), ('TK_LIBRARY', 'tk[0-9]*')]:
+        found = glob.glob(os.path.join(os.environ['RESOURCEPATH'], pattern))
+        if found:
+            os.environ[env_name] = found[0]
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import re
@@ -26,14 +35,59 @@ def parse_time_to_ms(time_str):
 def format_ms(ms):
     return f"{ms / 1000.0:.6f}"
 
+def format_hms(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+END_LINE_HINT = (
+    "テキストからJSONを作った場合は、次を確認してください:\n"
+    "・最後の行に「END 3:03:10」のような終了行があるか\n"
+    "・途中に「END」の行が混ざっていないか（最初のEND行が全体の終了として使われます）\n"
+    "・時刻が上から順番に増えているか"
+)
+
+def find_invalid_chapters(chapters):
+    """終了時刻が開始時刻以前、または時刻が読めないチャプターを返す"""
+    problems = []
+    for i, chapter in enumerate(chapters):
+        number = chapter.get("id", i) + 1
+        title = chapter.get("tags", {}).get("title", "chapter")
+        try:
+            start = float(chapter["start_time"])
+            end = float(chapter["end_time"])
+        except (KeyError, TypeError, ValueError):
+            problems.append(f"・{number}. {title}（開始/終了時刻が読み取れません）")
+            continue
+        if end <= start:
+            problems.append(f"・{number}. {title}（開始 {format_hms(start)} / 終了 {format_hms(end)}）")
+    return problems
+
+# ffmpegのエラーメッセージと、その日本語での説明
+FFMPEG_ERROR_HINTS = [
+    ("-to value smaller than -ss", "終了時刻が開始時刻以前になっています。"),
+    ("No such file or directory", "ファイルが見つかりません。外付けドライブが外れていないか確認してください。"),
+    ("Permission denied", "ファイルの読み書きが許可されていません。"),
+    ("No space left on device", "保存先のディスクの空き容量が足りません。"),
+    ("Invalid data found", "ファイルが壊れているか、対応していない形式です。"),
+    ("does not contain any stream", "ファイルに音声が含まれていません。"),
+    ("matches no streams", "ファイルに音声が含まれていません。"),
+]
+
+def explain_ffmpeg_error(output_lines):
+    text = "\n".join(output_lines)
+    for pattern, hint in FFMPEG_ERROR_HINTS:
+        if pattern in text:
+            return hint
+    return "原因を特定できませんでした。下のffmpegのメッセージを確認してください。"
+
 def get_ffmpeg_path():
-    for path in ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg", "ffmpeg"]:
+    for path in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]:
         if os.path.exists(path) and os.access(path, os.X_OK):
             return path
     return "ffmpeg"
 
 def get_ffprobe_path():
-    for path in ["/usr/local/bin/ffprobe", "/opt/homebrew/bin/ffprobe", "ffprobe"]:
+    for path in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "ffprobe"]:
         if os.path.exists(path) and os.access(path, os.X_OK):
             return path
     return "ffprobe"
@@ -150,6 +204,29 @@ def convert_text_to_json():
             "end_time": format_ms(end_ms),
             "tags": {"title": clean_title(title)}
         })
+
+    # 終了時刻が開始時刻以前のチャプターがあれば、原因を説明して保存しない
+    problems = []
+    for i, (cid, title, start_ms) in enumerate(parsed):
+        end_ms = chapters[i]["end"]
+        if end_ms > start_ms:
+            continue
+        label = f"・{clean_title(title)}（開始 {format_hms(start_ms / 1000)}）"
+        relation = "と同じです" if end_ms == start_ms else "より前です"
+        if i + 1 < len(parsed):
+            problems.append(f"{label}\n  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_hms(end_ms / 1000)} がこれ{relation}。時刻を確認してください。")
+        elif final_end is None:
+            problems.append(f"{label}\n  最後のチャプターですが、END行が無いため終了時刻が決まりません。\n  末尾に「END 3:03:10」のような行を追加してください。")
+        else:
+            reason = f"  END行の時刻 {format_hms(final_end / 1000)} がこれ{relation}。"
+            if final_end_line != len(lines) - 1:
+                reason += f"\n  途中の「{lines[final_end_line].strip()}」がEND行として使われています。\n  途中のEND行を削除してください。"
+            problems.append(f"{label}\n{reason}")
+    if problems:
+        details = "\n".join(problems)
+        log(f"❌ JSONに変換できないチャプターがあります:\n{details}")
+        messagebox.showerror("エラー", f"次のチャプターは終了時刻が開始時刻以前になるため、JSONを保存しませんでした。\n\n{details}")
+        return
 
     output = {"chapters": chapters}
 
@@ -347,10 +424,30 @@ def split_audio_fast():
                 return
             log(f"📄 JSONファイル: {json_path}")
 
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as e:
+                messagebox.showerror("エラー", f"JSONファイルの形式が正しくありません:\n{os.path.basename(json_path)}\n\n{e.lineno}行目 {e.colno}文字目: {e.msg}")
+                log(f"❌ JSON解析エラー: {e}")
+                return
 
             chapters = data.get("chapters", [])
+            if not chapters:
+                messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+                log("❌ JSONファイルにチャプター情報がありません")
+                return
+
+        # 分割を始める前に、分割できないチャプターが無いか確認
+        problems = find_invalid_chapters(chapters)
+        if problems:
+            details = "\n".join(problems)
+            log(f"❌ 分割できないチャプターがあります:\n{details}")
+            messagebox.showerror(
+                "チャプター情報のエラー",
+                f"次のチャプターは終了時刻が開始時刻以前になっているため、分割できません。\n\n{details}\n\n{END_LINE_HINT}"
+            )
+            return
 
         media_filename = os.path.splitext(os.path.basename(media_path))[0]
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -471,7 +568,7 @@ def split_audio_fast():
             if is_video:
                 # 動画：-ss/-toを-iの前に配置（アートワーク継承に必須）
                 cmd = [
-                    ffmpeg_path, "-y",
+                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
                     "-ss", start,
                     "-to", end,
                     "-i", media_path,
@@ -479,7 +576,7 @@ def split_audio_fast():
             else:
                 # 音声：-ss/-toを-iの後に配置（0057704の方法で途切れ防止）
                 cmd = [
-                    ffmpeg_path, "-y", "-i", media_path,
+                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error", "-i", media_path,
                     "-ss", start,
                     "-to", end,
                 ]
@@ -523,15 +620,22 @@ def split_audio_fast():
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace'
             )
+            ffmpeg_output = []
             for line in process.stdout:
                 if line.strip():
+                    ffmpeg_output.append(line.strip())
                     log(line.strip())
             process.wait()
 
             # エラーチェック
             if process.returncode != 0:
                 log(f"❌ ffmpegがエラーコード{process.returncode}で終了しました")
-                messagebox.showerror("エラー", f"チャプター{track_number}の処理に失敗しました")
+                messagebox.showerror(
+                    "エラー",
+                    f"チャプター{track_number}「{title}」（{format_hms(float(start))}〜{format_hms(float(end))}）の処理に失敗しました。\n\n"
+                    f"原因: {explain_ffmpeg_error(ffmpeg_output)}\n\n"
+                    f"ffmpegのメッセージ（エラーコード{process.returncode}）:\n" + "\n".join(ffmpeg_output[-5:])
+                )
                 return
 
             progress = ((i + 1) / len(chapters)) * 100
@@ -547,7 +651,7 @@ def split_audio_fast():
                 temp_file = output_file + ".temp.m4a"
 
                 artwork_cmd = [
-                    ffmpeg_path, "-y",
+                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
                     "-i", output_file,  # 分割済みファイル
                     "-i", media_path,   # 元のファイル（アートワーク取得用）
                     "-map", "0:a",      # 分割済みファイルの音声
@@ -562,13 +666,16 @@ def split_audio_fast():
                 process = subprocess.Popen(
                     artwork_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace'
                 )
-                process.wait()
+                artwork_output, _ = process.communicate()
 
                 if process.returncode == 0:
                     os.replace(temp_file, output_file)
                     log(f"  ✅ {os.path.basename(output_file)}")
                 else:
-                    log(f"  ⚠️ {os.path.basename(output_file)} - アートワーク追加失敗")
+                    error_lines = [l for l in artwork_output.splitlines() if l.strip()]
+                    log(f"  ⚠️ {os.path.basename(output_file)} - アートワーク追加失敗: {explain_ffmpeg_error(error_lines)}")
+                    for l in error_lines[-3:]:
+                        log(f"     {l}")
                     if os.path.exists(temp_file):
                         os.remove(temp_file)
 

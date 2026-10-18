@@ -12,6 +12,7 @@ __pycache__/
 .Python
 venv/
 venv312/
+venv-arm64/
 env/
 
 # macOS
