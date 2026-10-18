@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import traceback
 
 # py2appでバンドルされた場合、同梱したTcl/Tkライブラリを使う（Homebrewが無いMacでも起動するため）
@@ -35,9 +36,23 @@ def parse_time_to_ms(time_str):
 def format_ms(ms):
     return f"{ms / 1000.0:.6f}"
 
-def format_hms(seconds):
+def format_clock(seconds):
+    """再生位置の表示（例: 2:45、1:51:05）"""
     seconds = int(seconds)
-    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+    hours, minutes, secs = seconds // 3600, seconds % 3600 // 60, seconds % 60
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+def format_min_sec(seconds):
+    """時間の長さの表示（例: 26s、4m01s、160m22s）"""
+    seconds = int(seconds)
+    return f"{seconds // 60}m{seconds % 60:02d}s" if seconds >= 60 else f"{seconds}s"
+
+def format_elapsed(seconds):
+    """処理時間の表示（例: 2.0s、1m05s）"""
+    return f"{seconds:.1f}s" if round(seconds, 1) < 60 else format_min_sec(round(seconds))
+
+# ffmpegの同じ種類の警告をログに表示する最大回数（チャプターごと）
+MAX_SAME_WARNINGS = 3
 
 END_LINE_HINT = (
     "テキストからJSONを作った場合は、次を確認してください:\n"
@@ -59,7 +74,7 @@ def find_invalid_chapters(chapters):
             problems.append(f"・{number}. {title}（開始/終了時刻が読み取れません）")
             continue
         if end <= start:
-            problems.append(f"・{number}. {title}（開始 {format_hms(start)} / 終了 {format_hms(end)}）")
+            problems.append(f"・{number}. {title}（開始 {format_min_sec(start)} / 終了 {format_min_sec(end)}）")
     return problems
 
 # ffmpegのエラーメッセージと、その日本語での説明
@@ -211,14 +226,14 @@ def convert_text_to_json():
         end_ms = chapters[i]["end"]
         if end_ms > start_ms:
             continue
-        label = f"・{clean_title(title)}（開始 {format_hms(start_ms / 1000)}）"
+        label = f"・{clean_title(title)}（開始 {format_min_sec(start_ms / 1000)}）"
         relation = "と同じです" if end_ms == start_ms else "より前です"
         if i + 1 < len(parsed):
-            problems.append(f"{label}\n  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_hms(end_ms / 1000)} がこれ{relation}。時刻を確認してください。")
+            problems.append(f"{label}\n  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_min_sec(end_ms / 1000)} がこれ{relation}。時刻を確認してください。")
         elif final_end is None:
             problems.append(f"{label}\n  最後のチャプターですが、END行が無いため終了時刻が決まりません。\n  末尾に「END 3:03:10」のような行を追加してください。")
         else:
-            reason = f"  END行の時刻 {format_hms(final_end / 1000)} がこれ{relation}。"
+            reason = f"  END行の時刻 {format_min_sec(final_end / 1000)} がこれ{relation}。"
             if final_end_line != len(lines) - 1:
                 reason += f"\n  途中の「{lines[final_end_line].strip()}」がEND行として使われています。\n  途中のEND行を削除してください。"
             problems.append(f"{label}\n{reason}")
@@ -540,6 +555,7 @@ def split_audio_fast():
 
         # 出力ファイルのリストを保存（音声ファイルの場合、後でアートワークを追加）
         output_files = []
+        split_started = time.time()
 
         for i, chapter in enumerate(chapters):
             # 停止フラグをチェック
@@ -568,7 +584,7 @@ def split_audio_fast():
             if is_video:
                 # 動画：-ss/-toを-iの前に配置（アートワーク継承に必須）
                 cmd = [
-                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
+                    ffmpeg_path, "-y",
                     "-ss", start,
                     "-to", end,
                     "-i", media_path,
@@ -576,7 +592,7 @@ def split_audio_fast():
             else:
                 # 音声：-ss/-toを-iの後に配置（0057704の方法で途切れ防止）
                 cmd = [
-                    ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error", "-i", media_path,
+                    ffmpeg_path, "-y", "-i", media_path,
                     "-ss", start,
                     "-to", end,
                 ]
@@ -614,29 +630,46 @@ def split_audio_fast():
                 output_file
             ])
 
-            log(f"▶️ {track_number}: {title}")
+            log(f"{track_number}: {title} ({format_clock(float(start))}-{format_clock(float(end))}, {format_min_sec(float(end) - float(start))})")
             current_label.config(text=f"現在のチャプター: {track_number} - {title}")
 
+            chapter_started = time.time()
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace'
             )
             ffmpeg_output = []
+            # 壊れたファイルでは同じ警告が数万行出てログ表示が追いつかなくなるため、
+            # 同じ種類の警告は最初の数回だけ表示し、残りは件数だけ表示する
+            warning_counts = {}
+            suppressed = 0
             for line in process.stdout:
-                if line.strip():
-                    ffmpeg_output.append(line.strip())
-                    log(line.strip())
+                line = line.strip()
+                if not line:
+                    continue
+                ffmpeg_output.append(line)
+                if line.startswith("[") or line.startswith("Last message repeated"):
+                    key = re.sub(r"0x[0-9a-f]+|-?\d+", "#", line)
+                    warning_counts[key] = warning_counts.get(key, 0) + 1
+                    if warning_counts[key] > MAX_SAME_WARNINGS:
+                        suppressed += 1
+                        continue
+                log(line)
             process.wait()
+            if suppressed:
+                log(f"（同じ警告が続いたため {suppressed} 行を省略しました）")
 
             # エラーチェック
             if process.returncode != 0:
                 log(f"❌ ffmpegがエラーコード{process.returncode}で終了しました")
                 messagebox.showerror(
                     "エラー",
-                    f"チャプター{track_number}「{title}」（{format_hms(float(start))}〜{format_hms(float(end))}）の処理に失敗しました。\n\n"
+                    f"チャプター{track_number}「{title}」（{format_min_sec(float(start))}〜{format_min_sec(float(end))}）の処理に失敗しました。\n\n"
                     f"原因: {explain_ffmpeg_error(ffmpeg_output)}\n\n"
                     f"ffmpegのメッセージ（エラーコード{process.returncode}）:\n" + "\n".join(ffmpeg_output[-5:])
                 )
                 return
+
+            log(f"-> {format_elapsed(time.time() - chapter_started)}")
 
             progress = ((i + 1) / len(chapters)) * 100
             progress_var.set(progress)
@@ -684,7 +717,7 @@ def split_audio_fast():
                 root.update_idletasks()
 
         messagebox.showinfo("完了", "チャプター分割が完了しました。")
-        log("✅ 分割完了")
+        log(f"分割完了 (合計 {format_elapsed(time.time() - split_started)})")
         current_label.config(text="すべて完了")
         progress_var.set(0)
 
