@@ -165,7 +165,9 @@ current_label.pack(padx=10, pady=(0, 5))
 output_box = scrolledtext.ScrolledText(root, wrap="word", height=12, bg="white", fg="black", insertbackground="black")
 output_box.pack(padx=10, pady=10, fill="both", expand=True)
 
-text_input = scrolledtext.ScrolledText(root, wrap="word", height=12, bg="white", fg="black", insertbackground="black")
+# Tk 9.1 + macOSでは、wrap="word"の欄をクリックすると短い行でもスペースごとに折り返して表示されることがあるため、
+# 1行が短い曲リストの入力欄は折り返さない
+text_input = scrolledtext.ScrolledText(root, wrap="none", height=12, bg="white", fg="black", insertbackground="black")
 text_input.pack(padx=10, pady=(10, 5), fill="both", expand=True)
 
 def log(msg):
