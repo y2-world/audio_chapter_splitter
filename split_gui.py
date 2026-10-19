@@ -57,7 +57,7 @@ MAX_SAME_WARNINGS = 3
 END_LINE_HINT = (
     "テキストからJSONを作った場合は、次を確認してください:\n"
     "・最後の行に「END 3:03:10」のような終了行があるか\n"
-    "・途中に「END」の行が混ざっていないか（最初のEND行が全体の終了として使われます）\n"
+    "・途中に「END」だけの行が混ざっていないか（END行は最後の行だけが終了として使われます）\n"
     "・時刻が上から順番に増えているか"
 )
 
@@ -185,13 +185,12 @@ def convert_text_to_json():
     final_end_line = None
 
     try:
-        for i, line in enumerate(lines):
-            words = line.strip().split()
-            if len(words) >= 2 and words[-2].upper() == "END":
-                time_part = words[-1]
-                final_end = parse_time_to_ms(time_part)
-                final_end_line = i
-                break
+        # 最後の行の曲名がちょうど「END」のときだけ、全体の終了時刻として扱う
+        # （「Worlds end」のような曲名や、途中のEND行を終了と取り違えないため）
+        last_parts = lines[-1].strip().rsplit(" ", 1)
+        if len(last_parts) == 2 and clean_title(last_parts[0].strip()).upper() == "END":
+            final_end = parse_time_to_ms(last_parts[1])
+            final_end_line = len(lines) - 1
 
         parsed = []
         for idx, line in enumerate(lines):
@@ -229,14 +228,14 @@ def convert_text_to_json():
         label = f"・{clean_title(title)}（開始 {format_min_sec(start_ms / 1000)}）"
         relation = "と同じです" if end_ms == start_ms else "より前です"
         if i + 1 < len(parsed):
-            problems.append(f"{label}\n  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_min_sec(end_ms / 1000)} がこれ{relation}。時刻を確認してください。")
+            reason = f"  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_min_sec(end_ms / 1000)} がこれ{relation}。時刻を確認してください。"
+            if clean_title(title).upper() == "END":
+                reason += "\n  END行は最後の行にだけ書けます。途中のEND行は削除してください。"
+            problems.append(f"{label}\n{reason}")
         elif final_end is None:
             problems.append(f"{label}\n  最後のチャプターですが、END行が無いため終了時刻が決まりません。\n  末尾に「END 3:03:10」のような行を追加してください。")
         else:
-            reason = f"  END行の時刻 {format_min_sec(final_end / 1000)} がこれ{relation}。"
-            if final_end_line != len(lines) - 1:
-                reason += f"\n  途中の「{lines[final_end_line].strip()}」がEND行として使われています。\n  途中のEND行を削除してください。"
-            problems.append(f"{label}\n{reason}")
+            problems.append(f"{label}\n  END行の時刻 {format_min_sec(final_end / 1000)} がこれ{relation}。")
     if problems:
         details = "\n".join(problems)
         log(f"❌ JSONに変換できないチャプターがあります:\n{details}")
