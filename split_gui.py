@@ -717,8 +717,9 @@ def split_audio_fast():
                 progress_var.set(progress)
                 root.update_idletasks()
 
-        messagebox.showinfo("完了", "チャプター分割が完了しました。")
+        # 合計時間は完了ダイアログを出す前に計算する（OKを押すまでの時間を含めないため）
         log(f"分割完了 (合計 {format_elapsed(time.time() - split_started)})")
+        messagebox.showinfo("完了", "チャプター分割が完了しました。")
         current_label.config(text="すべて完了")
         progress_var.set(0)
 
