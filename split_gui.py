@@ -1139,15 +1139,28 @@ def open_live_manager():
     frame = tk.Frame(win)
     frame.pack(fill="both", expand=True, padx=10)
     tree = ttk.Treeview(frame, columns=[c for c, _, _ in columns], show="headings", selectmode="browse")
+    # 手で広げた列の幅を保つため、どの列も自動では伸び縮みさせない（はみ出した分は横にスクロールする）
+    saved_widths = load_settings().get("live_column_widths", {})
     for col, label, width in columns:
         tree.heading(col, text=label, command=lambda c=col: sort_by(c))
-        tree.column(col, width=width, anchor="w", stretch=(col == "album"))
+        tree.column(col, width=saved_widths.get(col, width), anchor="w", stretch=False)
     for s, (bg, fg) in LIVE_STATUS_COLORS.items():
         tree.tag_configure(s, background=bg, foreground=fg)
     scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-    tree.configure(yscrollcommand=scroll.set)
+    xscroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
+    xscroll.pack(side="bottom", fill="x")
     tree.pack(side="left", fill="both", expand=True)
     scroll.pack(side="right", fill="y")
+
+    def save_column_widths(event=None):
+        # 画面を閉じるときに、列の幅を覚えておく（次に開いたときも同じ幅で出す）
+        if event is not None and event.widget is not win:
+            return
+        settings = load_settings()
+        settings["live_column_widths"] = {col: tree.column(col, "width") for col, _, _ in columns}
+        save_settings(settings)
+    win.bind("<Destroy>", save_column_widths, add="+")
 
     def status_of(entry):
         manual = notes.get(entry["key"], {}).get("status")
