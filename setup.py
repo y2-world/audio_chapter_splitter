@@ -15,7 +15,7 @@ APP = ['split_gui.py']
 DATA_FILES = [TCL_LIBRARY, TK_LIBRARY]
 OPTIONS = {
     'argv_emulation': False,
-    'packages': ['tkinter'],
+    'packages': ['tkinter', 'mutagen'],
     'includes': ['tkinter', 'tkinter.filedialog', 'tkinter.messagebox', 'tkinter.scrolledtext', 'tkinter.ttk'],
     'excludes': [],
     'plist': {
@@ -23,8 +23,8 @@ OPTIONS = {
         'CFBundleDisplayName': 'チャプター分割ツール',
         'CFBundleGetInfoString': "動画・音声ファイルをチャプターごとに分割",
         'CFBundleIdentifier': "com.audiochaptersplitter.app",
-        'CFBundleVersion': "1.0.6",
-        'CFBundleShortVersionString': "1.0.6",
+        'CFBundleVersion': "1.0.7",
+        'CFBundleShortVersionString': "1.0.7",
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '26.0',
         'NSAppearance': 'NSAppearanceNameAqua',
