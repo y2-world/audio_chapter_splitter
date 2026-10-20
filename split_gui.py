@@ -175,6 +175,29 @@ def log(msg):
     output_box.see(tk.END)
     root.update_idletasks()
 
+def call_on_main(func, *args, **kwargs):
+    """作業用スレッドから、ダイアログなどの画面操作をメインスレッドで実行して結果を待つ"""
+    if threading.current_thread() is threading.main_thread():
+        return func(*args, **kwargs)
+    done = threading.Event()
+    result = {}
+    def run():
+        try:
+            result["value"] = func(*args, **kwargs)
+        finally:
+            done.set()
+    root.after(0, run)
+    done.wait()
+    return result.get("value")
+
+class _MainThreadMessagebox:
+    """messageboxと同じ使い方で、メインスレッドでダイアログを表示する"""
+    def __getattr__(self, name):
+        func = getattr(messagebox, name)
+        return lambda *args, **kwargs: call_on_main(func, *args, **kwargs)
+
+main_messagebox = _MainThreadMessagebox()
+
 def convert_text_to_json():
     input_text = text_input.get("1.0", tk.END).strip()
     lines = [line for line in input_text.splitlines() if line.strip()]
@@ -249,6 +272,7 @@ def convert_text_to_json():
     # JSONファイルの保存先を選択
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
     json_path = filedialog.asksaveasfilename(
+        parent=root,
         title="JSONファイルを保存",
         initialdir=desktop_path,
         initialfile="chapters.json",
@@ -267,6 +291,7 @@ def convert_text_to_json():
 def extract_chapters_from_video():
     def run():
         video_path = filedialog.askopenfilename(
+            parent=root,
             title="動画ファイルを選択",
             filetypes=[
                 ("Video files", "*.mp4 *.mov *.avi *.mkv *.m4v"),
@@ -314,6 +339,7 @@ def extract_chapters_from_video():
             # JSONファイルの保存先を選択
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
             json_path = filedialog.asksaveasfilename(
+                parent=root,
                 title="JSONファイルを保存",
                 initialdir=desktop_path,
                 initialfile="chapters.json",
@@ -338,133 +364,138 @@ def extract_chapters_from_video():
             messagebox.showerror("エラー", f"エラーが発生しました:\n{e}")
             log(f"❌ エラー: {e}")
 
-    threading.Thread(target=run).start()
+    run()
 
 def split_audio_fast():
-    def run():
-        media_path = filedialog.askopenfilename(
-            title="音声ファイルまたは動画ファイルを選択",
-            filetypes=[
-                ("Audio files", "*.m4a *.mp3 *.wav"),
-                ("Video files", "*.mp4 *.mov *.avi *.mkv"),
-                ("All files", "*.*")
-            ]
-        )
-        if not media_path:
-            return
+    media_path = filedialog.askopenfilename(
+        parent=root,
+        title="音声ファイルまたは動画ファイルを選択",
+        filetypes=[
+            ("Audio files", "*.m4a *.mp3 *.wav"),
+            ("Video files", "*.mp4 *.mov *.avi *.mkv"),
+            ("All files", "*.*")
+        ]
+    )
+    if not media_path:
+        return
 
-        # ファイルの拡張子で動画か音声かを判定
-        ext = os.path.splitext(media_path)[1].lower()
-        is_video = ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.webm', '.m4v']
+    # ファイルの拡張子で動画か音声かを判定
+    ext = os.path.splitext(media_path)[1].lower()
+    is_video = ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.webm', '.m4v']
 
-        log(f"📹 選択されたファイル: {media_path}")
-        log(f"📋 ファイルタイプ: {'動画' if is_video else '音声'}")
+    log(f"📹 選択されたファイル: {media_path}")
+    log(f"📋 ファイルタイプ: {'動画' if is_video else '音声'}")
 
-        # 動画ファイルの場合は、動画からチャプター情報を自動抽出
-        if is_video:
-            ffprobe_path = get_ffprobe_path()
-            log(f"▶ ffprobe path: {ffprobe_path}")
-            log("📊 動画からチャプター情報を抽出中...")
+    # 動画ファイルの場合は、動画からチャプター情報を自動抽出
+    if is_video:
+        ffprobe_path = get_ffprobe_path()
+        log(f"▶ ffprobe path: {ffprobe_path}")
+        log("📊 動画からチャプター情報を抽出中...")
 
-            cmd = [
-                ffprobe_path, "-i", media_path,
-                "-print_format", "json",
-                "-show_chapters",
-                "-loglevel", "error"
-            ]
+        cmd = [
+            ffprobe_path, "-i", media_path,
+            "-print_format", "json",
+            "-show_chapters",
+            "-loglevel", "error"
+        ]
 
-            try:
-                process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
-                )
-                stdout, stderr = process.communicate()
-
-                if process.returncode != 0:
-                    error_msg = stderr.strip() if stderr else "エラーが発生しました"
-                    messagebox.showerror("エラー", f"チャプター情報の抽出に失敗しました:\n{error_msg}")
-                    log(f"❌ エラー: {error_msg}")
-                    return
-
-                # JSONをパース
-                data = json.loads(stdout)
-                chapters = data.get("chapters", [])
-
-                if not chapters:
-                    log("⚠️ 動画にチャプター情報が見つかりませんでした")
-                    # JSONファイルを選択するか確認
-                    if messagebox.askyesno("チャプター情報なし",
-                                          "この動画ファイルにはチャプター情報が含まれていません。\n\nJSONファイルを選択して分割しますか？"):
-                        # JSONファイルを選択
-                        json_path = filedialog.askopenfilename(
-                            title="チャプターJSONファイルを選択",
-                            filetypes=[("JSON files", "*.json")],
-                            initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
-                        )
-                        if not json_path:
-                            log("❌ JSONファイルが選択されませんでした")
-                            return
-
-                        log(f"📄 JSONファイル: {json_path}")
-                        with open(json_path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                        chapters = data.get("chapters", [])
-
-                        if not chapters:
-                            messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
-                            log("❌ JSONファイルにチャプター情報がありません")
-                            return
-                        log(f"✅ JSONから{len(chapters)}個のチャプターを読み込みました")
-                    else:
-                        log("❌ 処理をキャンセルしました")
-                        return
-                else:
-                    log(f"✅ {len(chapters)}個のチャプターを検出しました")
-
-            except json.JSONDecodeError as e:
-                messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
-                log(f"❌ JSON解析エラー: {e}")
-                return
-            except Exception as e:
-                messagebox.showerror("エラー", f"エラーが発生しました:\n{e}")
-                log(f"❌ エラー: {e}")
-                return
-
-        else:
-            # 音声ファイルの場合は、JSONファイルを選択
-            json_path = filedialog.askopenfilename(
-                title="チャプターJSONファイルを選択",
-                filetypes=[("JSON files", "*.json")],
-                initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+        try:
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
             )
-            if not json_path:
-                return
-            log(f"📄 JSONファイル: {json_path}")
+            stdout, stderr = process.communicate()
 
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as e:
-                messagebox.showerror("エラー", f"JSONファイルの形式が正しくありません:\n{os.path.basename(json_path)}\n\n{e.lineno}行目 {e.colno}文字目: {e.msg}")
-                log(f"❌ JSON解析エラー: {e}")
+            if process.returncode != 0:
+                error_msg = stderr.strip() if stderr else "エラーが発生しました"
+                messagebox.showerror("エラー", f"チャプター情報の抽出に失敗しました:\n{error_msg}")
+                log(f"❌ エラー: {error_msg}")
                 return
 
+            # JSONをパース
+            data = json.loads(stdout)
             chapters = data.get("chapters", [])
-            if not chapters:
-                messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
-                log("❌ JSONファイルにチャプター情報がありません")
-                return
 
-        # 分割を始める前に、分割できないチャプターが無いか確認
-        problems = find_invalid_chapters(chapters)
-        if problems:
-            details = "\n".join(problems)
-            log(f"❌ 分割できないチャプターがあります:\n{details}")
-            messagebox.showerror(
-                "チャプター情報のエラー",
-                f"次のチャプターは終了時刻が開始時刻以前になっているため、分割できません。\n\n{details}\n\n{END_LINE_HINT}"
-            )
+            if not chapters:
+                log("⚠️ 動画にチャプター情報が見つかりませんでした")
+                # JSONファイルを選択するか確認
+                if messagebox.askyesno("チャプター情報なし",
+                                      "この動画ファイルにはチャプター情報が含まれていません。\n\nJSONファイルを選択して分割しますか？"):
+                    # JSONファイルを選択
+                    json_path = filedialog.askopenfilename(
+                        parent=root,
+                        title="チャプターJSONファイルを選択",
+                        filetypes=[("JSON files", "*.json")],
+                        initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+                    )
+                    if not json_path:
+                        log("❌ JSONファイルが選択されませんでした")
+                        return
+
+                    log(f"📄 JSONファイル: {json_path}")
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    chapters = data.get("chapters", [])
+
+                    if not chapters:
+                        messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+                        log("❌ JSONファイルにチャプター情報がありません")
+                        return
+                    log(f"✅ JSONから{len(chapters)}個のチャプターを読み込みました")
+                else:
+                    log("❌ 処理をキャンセルしました")
+                    return
+            else:
+                log(f"✅ {len(chapters)}個のチャプターを検出しました")
+
+        except json.JSONDecodeError as e:
+            messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
+            log(f"❌ JSON解析エラー: {e}")
+            return
+        except Exception as e:
+            messagebox.showerror("エラー", f"エラーが発生しました:\n{e}")
+            log(f"❌ エラー: {e}")
             return
 
+    else:
+        # 音声ファイルの場合は、JSONファイルを選択
+        json_path = filedialog.askopenfilename(
+            parent=root,
+            title="チャプターJSONファイルを選択",
+            filetypes=[("JSON files", "*.json")],
+            initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+        )
+        if not json_path:
+            return
+        log(f"📄 JSONファイル: {json_path}")
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            messagebox.showerror("エラー", f"JSONファイルの形式が正しくありません:\n{os.path.basename(json_path)}\n\n{e.lineno}行目 {e.colno}文字目: {e.msg}")
+            log(f"❌ JSON解析エラー: {e}")
+            return
+
+        chapters = data.get("chapters", [])
+        if not chapters:
+            messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+            log("❌ JSONファイルにチャプター情報がありません")
+            return
+
+    # 分割を始める前に、分割できないチャプターが無いか確認
+    problems = find_invalid_chapters(chapters)
+    if problems:
+        details = "\n".join(problems)
+        log(f"❌ 分割できないチャプターがあります:\n{details}")
+        messagebox.showerror(
+            "チャプター情報のエラー",
+            f"次のチャプターは終了時刻が開始時刻以前になっているため、分割できません。\n\n{details}\n\n{END_LINE_HINT}"
+        )
+        return
+
+    # ここから先の分割処理は時間がかかるため作業用スレッドで実行する
+    # （ファイル選択などのダイアログは作業用スレッドから開くと固まることがあるため、ここまではメインスレッドで行う）
+    def process():
         media_filename = os.path.splitext(os.path.basename(media_path))[0]
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
         output_dir = os.path.join(desktop_path, media_filename)
@@ -563,7 +594,7 @@ def split_audio_fast():
             global stop_flag
             if stop_flag:
                 log("❌ 処理が中断されました")
-                messagebox.showwarning("中断", "処理を中断しました。")
+                main_messagebox.showwarning("中断", "処理を中断しました。")
                 stop_flag = False
                 current_label.config(text="処理が中断されました")
                 progress_var.set(0)
@@ -662,7 +693,7 @@ def split_audio_fast():
             # エラーチェック
             if process.returncode != 0:
                 log(f"❌ ffmpegがエラーコード{process.returncode}で終了しました")
-                messagebox.showerror(
+                main_messagebox.showerror(
                     "エラー",
                     f"チャプター{track_number}「{title}」（{format_min_sec(float(start))}〜{format_min_sec(float(end))}）の処理に失敗しました。\n\n"
                     f"原因: {explain_ffmpeg_error(ffmpeg_output)}\n\n"
@@ -719,11 +750,11 @@ def split_audio_fast():
 
         # 合計時間は完了ダイアログを出す前に計算する（OKを押すまでの時間を含めないため）
         log(f"分割完了 (合計 {format_elapsed(time.time() - split_started)})")
-        messagebox.showinfo("完了", "チャプター分割が完了しました。")
+        main_messagebox.showinfo("完了", "チャプター分割が完了しました。")
         current_label.config(text="すべて完了")
         progress_var.set(0)
 
-    threading.Thread(target=run).start()
+    threading.Thread(target=process).start()
 
 btn_convert = tk.Button(root, text="📝 テキスト → JSON変換", command=convert_text_to_json)
 btn_convert.pack(fill="x", padx=10, pady=5)
