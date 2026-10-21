@@ -9,14 +9,34 @@ import time
 import traceback
 import unicodedata
 
-# py2appでバンドルされた場合、同梱したTcl/Tkライブラリを使う（Homebrewが無いMacでも起動するため）
+def report_startup_error(message):
+    """起動できなかったときに、原因をデスクトップのファイルとダイアログに出す
+    （他の人のMacでターミナルを開かなくても原因がわかるように。Tk が使えないときもあるので osascript で出す）"""
+    path = os.path.join(os.path.expanduser("~"), "Desktop", "チャプター分割ツール_エラー.txt")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\nmacOS {os.uname().release} / {os.uname().machine}\n\n{message}\n")
+    except OSError:
+        pass
+    text = ("チャプター分割ツールを起動できませんでした。\n\nデスクトップの「チャプター分割ツール_エラー.txt」を作った人に送ってください。\n\n"
+            + message[-600:]).replace("\\", "\\\\").replace('"', '\\"')
+    subprocess.run(["osascript", "-e", f'display dialog "{text}" buttons {{"OK"}} default button 1 with icon stop'], capture_output=True)
+
+# py2appでバンドルされた場合、同梱したTcl/Tkライブラリを使う（ビルドしたMacのTcl/Tkを探しに行かないように）
 if getattr(sys, 'frozen', False) and os.environ.get('RESOURCEPATH'):
-    for env_name, pattern in [('TCL_LIBRARY', 'tcl[0-9]*'), ('TK_LIBRARY', 'tk[0-9]*')]:
-        found = glob.glob(os.path.join(os.environ['RESOURCEPATH'], pattern))
+    resources = os.environ['RESOURCEPATH']
+    frameworks = os.path.join(os.path.dirname(resources), "Frameworks")
+    for env_name, patterns in [('TCL_LIBRARY', [os.path.join(resources, 'tcl[0-9]*'), os.path.join(frameworks, 'Tcl.framework/Versions/*/Resources/Scripts')]),
+                               ('TK_LIBRARY', [os.path.join(resources, 'tk[0-9]*'), os.path.join(frameworks, 'Tk.framework/Versions/*/Resources/Scripts')])]:
+        found = [p for pattern in patterns for p in glob.glob(pattern)]
         if found:
             os.environ[env_name] = found[0]
 
-import tkinter as tk
+try:
+    import tkinter as tk
+except Exception:
+    report_startup_error(traceback.format_exc())
+    sys.exit(1)
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import re
 
@@ -118,6 +138,10 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     print(f"エラーが発生しました:\n{error_msg}", file=sys.stderr)
     
+    # 起動の途中（画面ができる前）のエラーは、ファイルとダイアログに出す
+    if "root" not in globals():
+        report_startup_error(error_msg)
+        return
     # GUIが利用可能な場合は、エラーダイアログを表示
     try:
         import tkinter.messagebox as mb
@@ -147,8 +171,8 @@ try:
 
 except Exception as e:
     print(f"GUIの初期化に失敗しました: {e}", file=sys.stderr)
-    import tkinter.messagebox as mb
-    mb.showerror("エラー", f"アプリケーションの起動に失敗しました:\n{e}")
+    # 画面を作れなかったので、Tk のダイアログではなく osascript で原因を出す
+    report_startup_error(f"TCL_LIBRARY={os.environ.get('TCL_LIBRARY')}\nTK_LIBRARY={os.environ.get('TK_LIBRARY')}\n\n" + traceback.format_exc())
     sys.exit(1)
 
 # macOSでウィンドウを前面に表示

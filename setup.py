@@ -6,13 +6,16 @@ import tkinter
 # コード署名を無効化
 os.environ['CODESIGN_ALLOCATE'] = '/usr/bin/true'
 
-# ビルドに使うPythonのTcl/Tkライブラリ（init.tcl、tk.tcl等）をContents/Resourcesに同梱する
-# py2appはdylibしかコピーしないため、これが無いとHomebrewが入っていないMacで起動できない
+# macOS 15 でも動くように、python.org の Python（macOS 11 以降向けに作られている）でビルドする:
+#   venv-pyorg/bin/python setup.py py2app
+# HomebrewのPythonでビルドするときは、Tcl/Tkライブラリ（init.tcl、tk.tcl等）をContents/Resourcesに同梱する
+# （py2appはdylibしかコピーしないため、これが無いとHomebrewが入っていないMacで起動できない）。
+# python.org のPythonは Tcl/Tk を Tcl.framework・Tk.framework として持っていて、py2app がそのまま同梱する
 TCL_LIBRARY = tkinter.Tcl().eval('info library')
-TK_LIBRARY = glob.glob(os.path.join(os.path.dirname(TCL_LIBRARY), 'tk[0-9]*'))[0]
+TK_LIBRARY = glob.glob(os.path.join(os.path.dirname(TCL_LIBRARY), 'tk[0-9]*'))
 
 APP = ['split_gui.py']
-DATA_FILES = [TCL_LIBRARY, TK_LIBRARY]
+DATA_FILES = [TCL_LIBRARY, TK_LIBRARY[0]] if TK_LIBRARY and ".framework" not in TCL_LIBRARY else []
 OPTIONS = {
     'argv_emulation': False,
     'packages': ['tkinter', 'mutagen'],
@@ -28,10 +31,11 @@ OPTIONS = {
         'CFBundleVersion': "1.0.8",
         'CFBundleShortVersionString': "1.0.8",
         'NSHighResolutionCapable': True,
-        'LSMinimumSystemVersion': '26.0',
+        'LSMinimumSystemVersion': '15.0',
         'NSAppearance': 'NSAppearanceNameAqua',
     },
-    'emulate_shell_environment': True,
+    # 起動のたびにその Mac のシェルの設定を読み込むと、人によって起動に失敗することがあるのでやめる（ffmpeg は決まった場所を直接探す）
+    'emulate_shell_environment': False,
 }
 
 setup(
