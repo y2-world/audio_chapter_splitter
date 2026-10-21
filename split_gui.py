@@ -1094,6 +1094,7 @@ def open_live_manager():
     global live_manager_window
     # すでに開いている（最小化している）ときは、新しく作らずにその画面を出す
     if live_manager_window is not None and live_manager_window.winfo_exists():
+        live_manager_window.minimized_by_user = False
         live_manager_window.deiconify()
         live_manager_window.lift()
         live_manager_window.focus_force()
@@ -1101,6 +1102,31 @@ def open_live_manager():
     win = tk.Toplevel(root)
     live_manager_window = win
     win.title("ライブ音源の管理")
+
+    # ほかのアプリから戻ったとき、Tk は最小化した画面まで勝手に元に戻すことがある。
+    # 自分で戻したとき（Dock の画面をクリックしたときなど）はこの画面が選ばれた状態になるので、
+    # 戻った直後にこの画面が選ばれていなければ、勝手に戻ったとみなして最小化し直す
+    win.minimized_by_user = False
+    def on_unmap(event):
+        if event.widget is win and win.state() == "iconic":
+            win.minimized_by_user = True
+    def on_map(event):
+        if event.widget is not win or not win.minimized_by_user:
+            return
+        def check():
+            if not win.winfo_exists():
+                return
+            try:
+                focused = win.focus_get()
+            except KeyError:
+                focused = None
+            if focused is not None and (str(focused) == str(win) or str(focused).startswith(str(win) + ".")):
+                win.minimized_by_user = False
+            else:
+                win.iconify()
+        win.after(300, check)
+    win.bind("<Unmap>", on_unmap, add="+")
+    win.bind("<Map>", on_map, add="+")
     win.geometry("1500x720")
     state = {"albums": [], "sort": ("artist", False), "roots": load_live_roots()}
     state["notes_path"] = live_notes_path(state["roots"])
