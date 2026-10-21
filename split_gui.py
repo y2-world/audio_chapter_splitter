@@ -779,8 +779,6 @@ def split_audio_fast(media_path=None):
 
 # ---- ライブ音源の管理 ----
 
-# 読み込むフォルダの初期値（フォルダ設定で変えられる）
-DEFAULT_LIVE_ROOTS = ["/Volumes/Extreme Pro/Music", "/Volumes/Extreme Pro/Previous Music Library"]
 APP_SUPPORT_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "チャプター分割ツール")
 SETTINGS_PATH = os.path.join(APP_SUPPORT_DIR, "settings.json")
 # メモ・手で直した状態の保存先の名前（1つ目のフォルダがあるドライブの一番上に置く）
@@ -849,7 +847,8 @@ def save_settings(settings):
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 def load_live_roots():
-    return load_settings().get("live_roots") or [p for p in DEFAULT_LIVE_ROOTS if os.path.isdir(p)] or DEFAULT_LIVE_ROOTS
+    # 読み込むフォルダはMacごとに違うので初期値は持たない（初めて開いたときにフォルダ設定を出す）
+    return load_settings().get("live_roots") or []
 
 def artist_kind(folder_name):
     """「B'z (unofficial live audio)」→「unofficial live audio」のように、括弧の中の種類"""
@@ -1301,7 +1300,10 @@ def open_live_manager():
         state["albums"] = scan_live_albums(state["roots"])
         location_filter["values"] = ["すべて"] + [location_label(p) for p in state["roots"]] + ["複数"]
         if missing:
-            messagebox.showwarning("ライブ音源の管理", "次のフォルダが見つかりません（外付けドライブがつながっていないかもしれません）:\n\n" + "\n".join(missing), parent=win)
+            # 外付けドライブがつながっていないときと、ほかのMacで初めて開いたとき（この Mac のフォルダが無い）がある
+            if messagebox.askyesno("ライブ音源の管理", "次のフォルダが見つかりません（外付けドライブがつながっていないかもしれません）:\n\n" + "\n".join(missing)
+                                   + "\n\n読み込むフォルダを設定し直しますか？", parent=win):
+                win.after(0, edit_folders)
         artist_filter["values"] = ["すべて"] + sorted({base_artist(a) for e in state["albums"] for a in e["artists"]}, key=str.lower)
         kind_filter["values"] = ["すべて"] + sorted({artist_kind(a) for e in state["albums"] for a in e["artists"]})
         year_filter["values"] = ["すべて"] + sorted({e["date"][:4] for e in state["albums"] if e["date"][:4].isdigit()}, reverse=True)
@@ -1493,7 +1495,8 @@ def open_live_manager():
     location_filter.bind("<<ComboboxSelected>>", refresh_view)
     source_filter.bind("<<ComboboxSelected>>", refresh_view)
     ext_filter.bind("<<ComboboxSelected>>", refresh_view)
-    win.after(100, reload)
+    # 読み込むフォルダをまだ決めていなければ、先にフォルダ設定を出す
+    win.after(100, reload if state["roots"] else edit_folders)
 
 btn_convert = tk.Button(root, text="📝 テキスト → JSON変換", command=convert_text_to_json)
 btn_convert.pack(fill="x", padx=10, pady=5)
