@@ -23,6 +23,8 @@ OPTIONS = {
         'CFBundleDisplayName': 'チャプター分割ツール',
         'CFBundleGetInfoString': "動画・音声ファイルをチャプターごとに分割",
         'CFBundleIdentifier': "com.audiochaptersplitter.app",
+        # 実行ファイルの名前が日本語だと codesign が見つけられず署名が壊れる（他のMacで「壊れている」と出る）ので英字にする
+        'CFBundleExecutable': "ChapterSplitter",
         'CFBundleVersion': "1.0.8",
         'CFBundleShortVersionString': "1.0.8",
         'NSHighResolutionCapable': True,
