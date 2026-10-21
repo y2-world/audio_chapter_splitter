@@ -138,6 +138,13 @@ try:
     root.title("チャプター分割ツール")
     root.geometry("600x750")
 
+    # Dockのアイコンをクリックしたとき、Tkは最小化した画面をすべて元に戻してしまうので、
+    # メインの画面だけを出す（ライブ音源の管理は最小化したままにする）
+    def reopen_application():
+        root.deiconify()
+        root.lift()
+    root.createcommand("::tk::mac::ReopenApplication", reopen_application)
+
 except Exception as e:
     print(f"GUIの初期化に失敗しました: {e}", file=sys.stderr)
     import tkinter.messagebox as mb
@@ -208,6 +215,14 @@ def convert_text_to_json():
         messagebox.showwarning("警告", "テキストを入力してください。")
         return
 
+    # 「1.」の行より上に書いた文字列は、公演名などの見出しとして保存するファイル名に使う
+    first = next((i for i, line in enumerate(lines) if re.match(r"^\s*1\.", line)), 0)
+    heading = " ".join(line.strip() for line in lines[:first])
+    lines = lines[first:]
+    if not lines:
+        messagebox.showwarning("警告", "「1.」から始まる行がありません。")
+        return
+
     final_end = None
     final_end_line = None
 
@@ -273,11 +288,13 @@ def convert_text_to_json():
 
     # JSONファイルの保存先を選択
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    # ファイル名に使えない「/」「:」は置き換える
+    initial_name = re.sub(r"[/:]", "_", heading).strip() or "chapters"
     json_path = filedialog.asksaveasfilename(
         parent=root,
         title="JSONファイルを保存",
         initialdir=desktop_path,
-        initialfile="chapters.json",
+        initialfile=f"{initial_name}.json",
         defaultextension=".json",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
     )
@@ -1071,8 +1088,18 @@ def save_live_notes(notes, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(notes, f, ensure_ascii=False, indent=2)
 
+live_manager_window = None
+
 def open_live_manager():
+    global live_manager_window
+    # すでに開いている（最小化している）ときは、新しく作らずにその画面を出す
+    if live_manager_window is not None and live_manager_window.winfo_exists():
+        live_manager_window.deiconify()
+        live_manager_window.lift()
+        live_manager_window.focus_force()
+        return
     win = tk.Toplevel(root)
+    live_manager_window = win
     win.title("ライブ音源の管理")
     win.geometry("1500x720")
     state = {"albums": [], "sort": ("artist", False), "roots": load_live_roots()}
@@ -1180,7 +1207,15 @@ def open_live_manager():
                 "exts": entry["exts"],
                 "added_date": entry["added_date"], "split_date": entry["split_date"], "memo": notes.get(entry["key"], {}).get("memo", "")}
 
+    def save_filters():
+        """絞り込みと並べ替えを保存して、画面を閉じても次に開いたときに戻す"""
+        settings = load_settings()
+        settings["live_filters"] = {"search": search_var.get(), "sort": list(state["sort"]),
+                                    **{name: box.get() for name, box in filter_boxes.items()}}
+        save_settings(settings)
+
     def refresh_view(*_):
+        save_filters()
         query = normalize_name(search_var.get())
         rows = []
         # タグの数は、状態以外の絞り込みを反映した数にする
@@ -1245,6 +1280,10 @@ def open_live_manager():
         kind_filter["values"] = ["すべて"] + sorted({artist_kind(a) for e in state["albums"] for a in e["artists"]})
         year_filter["values"] = ["すべて"] + sorted({e["date"][:4] for e in state["albums"] if e["date"][:4].isdigit()}, reverse=True)
         ext_filter["values"] = ["すべて"] + sorted({x for e in state["albums"] for x in e["exts"].split(", ") if x})
+        # 保存していた絞り込みの値が、もう一覧に無いときは「すべて」に戻す
+        for box in filter_boxes.values():
+            if box.get() not in box["values"]:
+                box.set("すべて")
         for entry in state["albums"]:
             entry["length"] = None
         refresh_view()
@@ -1410,6 +1449,15 @@ def open_live_manager():
     # Tk 9 の macOS では右クリックが Button-3、以前の Tk では Button-2 で届く
     for sequence in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
         tree.bind(sequence, show_context_menu)
+    # 前回の絞り込みと並べ替えを戻す
+    filter_boxes = {"artist": artist_filter, "kind": kind_filter, "year": year_filter, "type": type_filter,
+                    "status": status_filter, "location": location_filter, "source": source_filter, "ext": ext_filter}
+    saved_filters = load_settings().get("live_filters", {})
+    for name, box in filter_boxes.items():
+        box.set(saved_filters.get(name) or "すべて")
+    search_var.set(saved_filters.get("search", ""))
+    if saved_filters.get("sort") and saved_filters["sort"][0] in {c for c, _, _ in columns}:
+        state["sort"] = tuple(saved_filters["sort"])
     search_var.trace_add("write", refresh_view)
     artist_filter.bind("<<ComboboxSelected>>", refresh_view)
     kind_filter.bind("<<ComboboxSelected>>", refresh_view)
