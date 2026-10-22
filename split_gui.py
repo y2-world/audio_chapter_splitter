@@ -2,6 +2,7 @@ import collections
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1111,6 +1112,109 @@ def save_live_notes(notes, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(notes, f, ensure_ascii=False, indent=2)
 
+# Music のライブラリをまとめて読む（曲の情報と、手元のファイルにつながっている曲の場所）
+MUSIC_LIBRARY_SCRIPT = """
+function run(){const m=Application('Music');const t=m.libraryPlaylists[0].tracks;
+const id=t.persistentID(),n=t.name(),al=t.album(),ar=t.artist(),aa=t.albumArtist(),c=t.class(),cs=t.cloudStatus();
+const o=[];for(let i=0;i<id.length;i++)o.push([id[i],n[i],al[i],ar[i],aa[i],c[i],cs[i]]);
+const f=m.libraryPlaylists[0].fileTracks;const fid=f.persistentID(),l=f.location();const loc={};
+for(let i=0;i<fid.length;i++)if(l[i])loc[fid[i]]=l[i].toString();
+return JSON.stringify({tracks:o,locations:loc})}
+"""
+# iCloud の状態：アップ済みとして数えるもの
+CLOUD_UPLOADED = {"uploaded", "matched", "duplicate"}
+CLOUD_STREAMING = {"subscription", "purchased"}
+LIBRARY_RELATIONS = ["ライブラリにある（このファイル）", "ライブラリにある（ほかの場所に残りあり）", "ライブラリにある（Music のファイル）", "ライブラリにある（クラウドだけ）",
+                     "ライブラリにある（配信）", "公演まるごとだけ", "別の音源", "ライブラリに無い"]
+ICLOUD_STATES = ["アップ済み", "一部だけアップ済み", "アップされていない", "配信の曲", "ライブラリに無い"]
+
+def read_music_library():
+    """Music のライブラリを読む。読めなければ None（Music が無い・許可していないなど）"""
+    try:
+        out = subprocess.run(["osascript", "-l", "JavaScript", "-e", MUSIC_LIBRARY_SCRIPT],
+                             capture_output=True, text=True, timeout=300).stdout
+        data = json.loads(out)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    tracks = []
+    for pid, name, album, artist, album_artist, cls, cloud in data["tracks"]:
+        location = data["locations"].get(pid, "")
+        tracks.append({"pid": pid, "name": name or "", "album": album or "", "artists": {normalize_name(a) for a in (artist, album_artist) if a},
+                       "cloud": cloud, "location": unicodedata.normalize("NFC", location), "date": live_date(album or "")})
+    return tracks
+
+def index_music_library(tracks):
+    by_location = {t["location"]: t for t in tracks if t["location"]}
+    by_album = collections.defaultdict(list)
+    by_date = collections.defaultdict(list)
+    for t in tracks:
+        by_album[normalize_name(t["album"])].append(t)
+        if t["date"]:
+            by_date[t["date"]].append(t)
+    return {"location": by_location, "album": by_album, "date": by_date}
+
+def same_artist(entry, track):
+    names = {normalize_name(base_artist(a)) for a in entry["artists"]}
+    return any(a == b or a in b or b in a for a in names for b in track["artists"] if a and b)
+
+def library_relation(entry, index):
+    """公演とライブラリの関係（どれに当たるか、関係する曲）と、iCloud の状態"""
+    paths = entry["sources"] + entry["track_paths"]
+    linked = [index["location"][p] for p in (unicodedata.normalize("NFC", p) for p in paths) if p in index["location"]]
+    if linked:
+        source_set = {unicodedata.normalize("NFC", p) for p in entry["sources"]}
+        linked_dirs = {os.path.dirname(t["location"]) for t in linked}
+        if entry["tracks"] and all(t["location"] in source_set for t in linked):
+            relation, related = "公演まるごとだけ", linked
+        elif any(unicodedata.normalize("NFC", os.path.dirname(p)) not in linked_dirs for p in paths):
+            # Music と Previous の両方にある公演で、つながっていない古いファイルが別のフォルダに残っている
+            relation, related = "ライブラリにある（ほかの場所に残りあり）", linked
+        else:
+            relation, related = "ライブラリにある（このファイル）", linked
+    else:
+        related = [t for t in index["album"].get(normalize_name(entry["album"]), []) if same_artist(entry, t)]
+        if entry["title"]:
+            # 「Live Rec/2024」のような1ファイル1録音のフォルダは、アルバム名ではなく曲名で探す
+            related = [t for t in related if normalize_name(t["name"]) == normalize_name(entry["title"])]
+        # 何公演も入ったアルバムは、その公演の日付の曲だけにする（ライブラリの方で公演ごとに分けている場合もある）
+        if related and entry["date"] and any(t["date"] for t in related):
+            related = [t for t in related if t["date"] in ("", entry["date"])] or related
+        if not related and entry["date"][:1].isdigit():
+            related = [t for t in index["date"].get(entry["date"], []) if same_artist(entry, t)]
+            if related:
+                albums = sorted({t["album"] for t in related})
+                return f"別の音源：{' / '.join(albums)}", "別の音源", "ライブラリに無い", related
+        if not related:
+            return "ライブラリに無い", "ライブラリに無い", "ライブラリに無い", []
+        if entry["tracks"] > 1 and len(related) == 1:
+            relation = "公演まるごとだけ"
+        elif all(t["cloud"] in CLOUD_STREAMING for t in related):
+            relation = "ライブラリにある（配信）"
+        elif any(t["location"] for t in related):
+            relation = "ライブラリにある（Music のファイル）"
+        else:
+            relation = "ライブラリにある（クラウドだけ）"
+    own = [t for t in related if t["cloud"] not in CLOUD_STREAMING]
+    if not own:
+        cloud = "配信の曲"
+    else:
+        up = sum(t["cloud"] in CLOUD_UPLOADED for t in own)
+        cloud = "アップ済み" if up == len(own) else ("一部だけアップ済み" if up else "アップされていない")
+    return relation, relation, cloud, related
+
+def trash_files(paths):
+    """Finder でゴミ箱に入れる（あとで戻せるように）"""
+    script = ('on run argv\nset l to {}\nrepeat with p in argv\nset end of l to POSIX file (p as text)\nend repeat\n'
+              'tell application "Finder" to delete l\nend run')
+    result = subprocess.run(["osascript", "-e", script] + list(paths), capture_output=True, text=True)
+    return result.returncode == 0, result.stderr.strip()
+
+def add_to_music(paths):
+    script = ('on run argv\nset l to {}\nrepeat with p in argv\nset end of l to POSIX file (p as text)\nend repeat\n'
+              'tell application "Music" to add l\nend run')
+    result = subprocess.run(["osascript", "-e", script] + list(paths), capture_output=True, text=True, timeout=1800)
+    return result.returncode == 0, result.stderr.strip()
+
 live_manager_window = None
 
 def open_live_manager():
@@ -1177,21 +1281,34 @@ def open_live_manager():
     year_filter.set("すべて")
     year_filter.pack(side="left", padx=(5, 15))
     tk.Label(bar, text="状態").pack(side="left")
-    status_filter = ttk.Combobox(bar, values=["すべて"] + LIVE_STATUSES, state="readonly", width=22)
+    status_filter = ttk.Combobox(bar, values=["すべて"] + LIVE_STATUSES, state="readonly", width=10)
     status_filter.set("すべて")
     status_filter.pack(side="left", padx=(5, 15))
-    tk.Label(bar, text="拡張子").pack(side="left")
-    ext_filter = ttk.Combobox(bar, values=["すべて"], state="readonly", width=6)
+    bar2 = tk.Frame(win)
+    bar2.pack(fill="x", padx=10, pady=(0, 5))
+    # 1段目に入りきらない分は2段目に置く
+    tk.Label(bar2, text="拡張子").pack(side="left")
+    ext_filter = ttk.Combobox(bar2, values=["すべて"], state="readonly", width=6)
     ext_filter.set("すべて")
     ext_filter.pack(side="left", padx=(5, 15))
-    tk.Label(bar, text="元データ").pack(side="left")
-    source_filter = ttk.Combobox(bar, values=["すべて", "あり", "なし"], state="readonly", width=6)
+    tk.Label(bar2, text="元データ").pack(side="left")
+    source_filter = ttk.Combobox(bar2, values=["すべて", "あり", "なし"], state="readonly", width=6)
     source_filter.set("すべて")
     source_filter.pack(side="left", padx=(5, 15))
-    tk.Label(bar, text="場所").pack(side="left")
-    location_filter = ttk.Combobox(bar, values=["すべて"], state="readonly", width=14)
+    tk.Label(bar2, text="場所").pack(side="left")
+    location_filter = ttk.Combobox(bar2, values=["すべて"], state="readonly", width=14)
     location_filter.set("すべて")
     location_filter.pack(side="left", padx=(5, 15))
+    tk.Label(bar2, text="ライブラリ").pack(side="left")
+    library_filter = ttk.Combobox(bar2, values=["すべて"] + LIBRARY_RELATIONS, state="readonly", width=30)
+    library_filter.set("すべて")
+    library_filter.pack(side="left", padx=(5, 15))
+    tk.Label(bar2, text="iCloud").pack(side="left")
+    icloud_filter = ttk.Combobox(bar2, values=["すべて"] + ICLOUD_STATES, state="readonly", width=16)
+    icloud_filter.set("すべて")
+    icloud_filter.pack(side="left", padx=(5, 15))
+    library_label = tk.Label(bar2, text="", fg="#555")
+    library_label.pack(side="left", padx=10)
     # 状態のタグ（色の見本を兼ね、押すとその状態だけに絞り込む）
     tag_bar = tk.Frame(win)
     tag_bar.pack(fill="x", padx=10, pady=(0, 5))
@@ -1210,7 +1327,7 @@ def open_live_manager():
     length_label.pack(side="right", padx=10)
 
     columns = [("status", "状態", 80), ("date", "公演日", 90), ("venue", "会場・タイトル", 240), ("type", "音源", 45), ("artist", "アーティスト", 150),
-               ("album", "アルバム", 320), ("location", "場所", 90), ("length", "時間", 70), ("exts", "拡張子", 70), ("tracks", "曲数", 45), ("sources", "元データ", 70), ("added_date", "追加日", 90),
+               ("album", "アルバム", 320), ("location", "場所", 90), ("library", "ライブラリ", 200), ("icloud", "iCloud", 110), ("length", "時間", 70), ("exts", "拡張子", 70), ("tracks", "曲数", 45), ("sources", "元データ", 70), ("added_date", "追加日", 90),
                ("split_date", "分割日", 90), ("memo", "メモ", 120)]
     frame = tk.Frame(win)
     frame.pack(fill="both", expand=True, padx=10)
@@ -1254,6 +1371,7 @@ def open_live_manager():
                 "sources": f"あり（{len(entry['sources'])}）" if entry["sources"] else "なし",
                 "length": format_clock(entry["length"]) if entry.get("length") else ("…" if entry.get("length") is None else ""),
                 "exts": entry["exts"],
+                "library": entry.get("library", "…"), "icloud": entry.get("icloud", "…"),
                 "added_date": entry["added_date"], "split_date": entry["split_date"], "memo": notes.get(entry["key"], {}).get("memo", "")}
 
     def save_filters():
@@ -1269,10 +1387,10 @@ def open_live_manager():
         rows = []
         # タグの数は、状態以外の絞り込みを反映した数にする
         counts = {s: 0 for s in LIVE_STATUSES}
+        # アーティストの一覧には、アーティスト以外の絞り込みで残る公演のアーティストだけを出す
+        available_artists = set()
         for entry in state["albums"]:
             values = row_values(entry)
-            if artist_filter.get() != "すべて" and artist_filter.get() not in {base_artist(a) for a in entry["artists"]}:
-                continue
             if kind_filter.get() != "すべて" and kind_filter.get() not in {artist_kind(a) for a in entry["artists"]}:
                 continue
             if year_filter.get() != "すべて" and not values["date"].startswith(year_filter.get()):
@@ -1285,12 +1403,27 @@ def open_live_manager():
                 continue
             if source_filter.get() != "すべて" and values["sources"][:2] != source_filter.get():
                 continue
+            # ライブラリを読み終わるまでは、ライブラリと iCloud では絞り込まない
+            if library_filter.get() != "すべて" and "library_kind" in entry and entry["library_kind"] != library_filter.get():
+                continue
+            if icloud_filter.get() != "すべて" and "icloud" in entry and entry["icloud"] != icloud_filter.get():
+                continue
             if query and query not in normalize_name(values["artist"] + values["album"] + values["venue"] + values["memo"]):
                 continue
+            artists = {base_artist(a) for a in entry["artists"]}
+            in_status = status_filter.get() == "すべて" or status_of(entry) == status_filter.get()
+            if in_status:
+                available_artists |= artists
+            if artist_filter.get() != "すべて" and artist_filter.get() not in artists:
+                continue
             counts[status_of(entry)] += 1
-            if status_filter.get() != "すべて" and status_of(entry) != status_filter.get():
+            if not in_status:
                 continue
             rows.append((entry, values))
+        # 選んでいるアーティストは、0件になっても選び直せるように一覧に残す
+        if artist_filter.get() != "すべて":
+            available_artists.add(artist_filter.get())
+        artist_filter["values"] = ["すべて"] + sorted(available_artists, key=str.lower)
         col, reverse = state["sort"]
         if col == "length":
             # 長さは「1:02:03」の文字ではなく秒数で並べる
@@ -1340,6 +1473,30 @@ def open_live_manager():
             entry["length"] = None
         refresh_view()
         start_length_calculation()
+        start_library_read()
+
+    def apply_library(tracks):
+        if tracks is None:
+            library_label.config(text="Music のライブラリを読めませんでした")
+            for entry in state["albums"]:
+                entry["library"] = entry["icloud"] = entry["library_kind"] = ""
+                entry["related"] = []
+        else:
+            index = index_music_library(tracks)
+            for entry in state["albums"]:
+                entry["library"], entry["library_kind"], entry["icloud"], entry["related"] = library_relation(entry, index)
+            library_label.config(text=f"Music のライブラリ {len(tracks)}曲を読みました（{time.strftime('%H:%M')}）")
+        refresh_view()
+
+    def start_library_read():
+        """Music のライブラリは裏で読んで、読み終わったら表に反映する"""
+        library_label.config(text="Music のライブラリを読み込み中...")
+        generation = state.get("generation")
+        def work():
+            tracks = read_music_library()
+            if generation == state.get("generation") and win.winfo_exists():
+                call_on_main(lambda: apply_library(tracks))
+        threading.Thread(target=work, daemon=True).start()
 
     def start_length_calculation():
         """長さは裏で計算して、少しずつ表に反映する（初回は数十秒かかるため）"""
@@ -1428,6 +1585,107 @@ def open_live_manager():
         tk.Button(dialog, text="保存", command=apply).pack(pady=(5, 15))
         dialog.grab_set()
 
+    def entry_files(entry):
+        """その公演のファイルを、ライブラリにつながっているものと、つながっていないものに分ける"""
+        paths = entry["sources"] + entry["track_paths"]
+        locations = {t["location"] for t in entry.get("related", []) if t["location"]}
+        linked = [p for p in paths if unicodedata.normalize("NFC", p) in locations]
+        return [p for p in paths if p not in linked], linked
+
+    def remove_empty_folders(entry):
+        # ファイルを移した・ゴミ箱に入れた後、空になったアルバムのフォルダは消す（.DS_Store だけ残っている場合も）
+        for _, folder in entry["folders"]:
+            try:
+                rest = [n for n in os.listdir(folder) if n != ".DS_Store"]
+                if not rest:
+                    if os.path.exists(os.path.join(folder, ".DS_Store")):
+                        os.remove(os.path.join(folder, ".DS_Store"))
+                    os.rmdir(folder)
+            except OSError:
+                pass
+
+    def move_to_music_folder():
+        entry = selected()
+        if not entry:
+            return
+        files, linked = entry_files(entry)
+        # 移し先：この公演の曲がいちばん多くつながっているフォルダ（Music と Previous の両方にある公演では、Music の方）
+        targets = collections.Counter(os.path.dirname(t["location"]) for t in entry.get("related", []) if t["location"])
+        if not targets:
+            messagebox.showinfo("ライブ音源の管理", "この公演の曲がつながっているフォルダが見つかりません。", parent=win)
+            return
+        target = targets.most_common(1)[0][0]
+        files = [p for p in files if unicodedata.normalize("NFC", os.path.dirname(p)) != target]
+        if not files:
+            messagebox.showinfo("ライブ音源の管理", "移せるファイルがありません（どれもライブラリにつながっています）。", parent=win)
+            return
+        same = [p for p in files if os.path.exists(os.path.join(target, os.path.basename(p)))]
+        message = f"次のフォルダへ {len(files)}個のファイルを移します。\n\n{target}"
+        if same:
+            message += f"\n\n移し先に同じ名前のファイルがある {len(same)}個は移さずに残します。"
+        if linked:
+            message += f"\n\nライブラリにつながっている {len(linked)}個は移しません。"
+        if not messagebox.askyesno("Music の同じ公演のフォルダへ移す", message, parent=win):
+            return
+        moved, failed = 0, []
+        for p in files:
+            if p in same:
+                continue
+            try:
+                shutil.move(p, os.path.join(target, os.path.basename(p)))
+                moved += 1
+            except OSError as e:
+                failed.append(f"{os.path.basename(p)}: {e}")
+        remove_empty_folders(entry)
+        messagebox.showinfo("ライブ音源の管理", f"{moved}個を移しました。" + ("\n\n移せなかったもの:\n" + "\n".join(failed[:10]) if failed else ""), parent=win)
+        reload()
+
+    def move_to_trash():
+        entry = selected()
+        if not entry:
+            return
+        files, linked = entry_files(entry)
+        if not files:
+            messagebox.showinfo("ライブ音源の管理", "ゴミ箱に入れられるファイルがありません（どれもライブラリにつながっています）。", parent=win)
+            return
+        names = "\n".join(os.path.join(*p.split(os.sep)[-3:]) for p in files[:15]) + (f"\n…ほか {len(files) - 15}個" if len(files) > 15 else "")
+        message = f"{entry['album']}\n\nこの公演の {len(files)}個のファイルをゴミ箱に入れます。よろしいですか？\n\n{names}"
+        if linked:
+            message += f"\n\nライブラリにつながっている {len(linked)}個はゴミ箱に入れません。"
+        if not messagebox.askyesno("ゴミ箱に入れる", message, icon="warning", parent=win):
+            return
+        ok, error = trash_files(files)
+        remove_empty_folders(entry)
+        if not ok:
+            messagebox.showerror("ライブ音源の管理", f"ゴミ箱に入れられませんでした。\n\n{error}", parent=win)
+        reload()
+
+    def add_to_library():
+        entry = selected()
+        if not entry:
+            return
+        files, linked = entry_files(entry)
+        # 分割した曲があればそれを、無ければ元データを追加する（WAV・AIFF は追加しない）
+        candidates = [p for p in (entry["track_paths"] or entry["sources"]) if p in files]
+        playable = [p for p in candidates if os.path.splitext(p)[1].lower() not in (".wav", ".aif", ".aiff")]
+        if not playable:
+            messagebox.showinfo("ライブ音源の管理", "追加できるファイルがありません（WAV・AIFF は追加しません。ライブラリにあるものも除きます）。", parent=win)
+            return
+        message = f"{entry['album']}\n\n{len(playable)}個のファイルを Music のライブラリに追加します。"
+        if entry.get("related"):
+            message += f"\n\n（ライブラリには、すでにこの公演の曲が {len(entry['related'])}曲あります：{entry.get('library', '')}）"
+        if not messagebox.askyesno("ライブラリに追加する", message, parent=win):
+            return
+        library_label.config(text="Music に追加中...")
+        def work():
+            ok, error = add_to_music(sorted(playable))
+            def done():
+                if not ok:
+                    messagebox.showerror("ライブ音源の管理", f"追加できませんでした。\n\n{error}", parent=win)
+                reload()
+            call_on_main(done)
+        threading.Thread(target=work, daemon=True).start()
+
     def edit_folders():
         dialog = tk.Toplevel(win)
         dialog.title("フォルダ設定")
@@ -1491,6 +1749,10 @@ def open_live_manager():
     context_menu.add_separator()
     context_menu.add_command(label="状態を変更", command=set_status)
     context_menu.add_command(label="メモ", command=edit_memo)
+    context_menu.add_separator()
+    context_menu.add_command(label="Music の同じ公演のフォルダへ移す", command=move_to_music_folder)
+    context_menu.add_command(label="ライブラリに追加する", command=add_to_library)
+    context_menu.add_command(label="ゴミ箱に入れる", command=move_to_trash)
     def show_context_menu(event):
         row = tree.identify_row(event.y)
         if not row:
@@ -1503,7 +1765,8 @@ def open_live_manager():
         tree.bind(sequence, show_context_menu)
     # 前回の絞り込みと並べ替えを戻す
     filter_boxes = {"artist": artist_filter, "kind": kind_filter, "year": year_filter, "type": type_filter,
-                    "status": status_filter, "location": location_filter, "source": source_filter, "ext": ext_filter}
+                    "status": status_filter, "location": location_filter, "source": source_filter, "ext": ext_filter,
+                    "library": library_filter, "icloud": icloud_filter}
     saved_filters = load_settings().get("live_filters", {})
     for name, box in filter_boxes.items():
         box.set(saved_filters.get(name) or "すべて")
@@ -1519,6 +1782,8 @@ def open_live_manager():
     location_filter.bind("<<ComboboxSelected>>", refresh_view)
     source_filter.bind("<<ComboboxSelected>>", refresh_view)
     ext_filter.bind("<<ComboboxSelected>>", refresh_view)
+    library_filter.bind("<<ComboboxSelected>>", refresh_view)
+    icloud_filter.bind("<<ComboboxSelected>>", refresh_view)
     # 読み込むフォルダをまだ決めていなければ、先にフォルダ設定を出す
     win.after(100, reload if state["roots"] else edit_folders)
 
