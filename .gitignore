@@ -20,3 +20,5 @@ env/
 
 # PyInstaller
 *.app
+venv-pyorg/
+venv-py314/

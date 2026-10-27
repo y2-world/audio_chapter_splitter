@@ -48,7 +48,7 @@ def clean_title(title):
 
 def parse_time_to_ms(time_str):
     if not re.match(r'^\d{1,2}:\d{2}(:\d{2})?$', time_str):
-        raise ValueError(f"不正な時間形式: {time_str}")
+        raise ValueError(f"時刻が読めません: {time_str}")
     parts = list(map(int, time_str.split(":")))
     if len(parts) == 3:
         return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000
@@ -201,8 +201,19 @@ output_box.pack(padx=10, pady=10, fill="both", expand=True)
 
 # Tk 9.1 + macOSでは、wrap="word"の欄をクリックすると短い行でもスペースごとに折り返して表示されることがあるため、
 # 1行が短い曲リストの入力欄は折り返さない
-text_input = scrolledtext.ScrolledText(root, wrap="none", height=12, bg="white", fg="black", insertbackground="black")
+# undo=True で ⌘Z（取り消し）・⌘⇧Z（やり直し）を使えるようにする
+text_input = scrolledtext.ScrolledText(root, wrap="none", height=12, bg="white", fg="black", insertbackground="black", undo=True, maxundo=-1)
 text_input.pack(padx=10, pady=(10, 5), fill="both", expand=True)
+
+def undo_redo(widget, action):
+    try:
+        widget.edit_undo() if action == "undo" else widget.edit_redo()
+    except tk.TclError:
+        pass  # 取り消せるものが無い
+    return "break"
+text_input.bind("<Command-z>", lambda e: undo_redo(text_input, "undo"))
+text_input.bind("<Command-Z>", lambda e: undo_redo(text_input, "redo"))
+text_input.bind("<Command-Shift-z>", lambda e: undo_redo(text_input, "redo"))
 
 def log(msg):
     output_box.insert(tk.END, msg + "\n")
@@ -232,6 +243,62 @@ class _MainThreadMessagebox:
 
 main_messagebox = _MainThreadMessagebox()
 
+def ask_json_save_path(initial_name):
+    """JSONを保存する名前を、アプリの中の画面で聞く（デスクトップに保存）。保存しないときは None
+    （アプリとして起動したとき、macOS の保存の画面で名前の欄に文字が入らないことがあるため）"""
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    result = {"path": None}
+    dialog = tk.Toplevel(root)
+    dialog.title("JSONを保存")
+    dialog.transient(root)
+    dialog.resizable(False, False)
+    tk.Label(dialog, text="保存する名前（デスクトップに保存します）").pack(padx=15, pady=(15, 5), anchor="w")
+    row = tk.Frame(dialog)
+    row.pack(padx=15, fill="x")
+    name_var = tk.StringVar(value=initial_name)
+    entry = tk.Entry(row, textvariable=name_var, width=45)
+    entry.pack(side="left", fill="x", expand=True)
+    tk.Label(row, text=".json").pack(side="left")
+
+    def save(_=None):
+        name = re.sub(r"[/:]", "_", name_var.get()).strip()
+        if name.lower().endswith(".json"):
+            name = name[:-5]
+        if not name:
+            messagebox.showwarning("JSONを保存", "名前を入れてください", parent=dialog)
+            return
+        path = os.path.join(desktop_path, f"{name}.json")
+        if os.path.exists(path) and not messagebox.askyesno("JSONを保存", f"「{name}.json」はもうあります。上書きしますか？", parent=dialog):
+            return
+        result["path"] = path
+        dialog.destroy()
+
+    def choose_place():
+        name = re.sub(r"[/:]", "_", name_var.get()).strip() or initial_name
+        dialog.destroy()
+        result["path"] = filedialog.asksaveasfilename(
+            parent=root, title="JSONファイルを保存", initialdir=desktop_path, initialfile=f"{name}.json",
+            defaultextension=".json", filetypes=[("JSON files", "*.json"), ("All files", "*.*")]) or None
+
+    buttons = tk.Frame(dialog)
+    buttons.pack(padx=15, pady=15, fill="x")
+    tk.Button(buttons, text="保存", command=save, default="active").pack(side="right")
+    tk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side="right", padx=5)
+    tk.Button(buttons, text="場所を選んで保存…", command=choose_place).pack(side="left")
+    dialog.bind("<Return>", save)
+    dialog.bind("<Escape>", lambda e: dialog.destroy())
+    dialog.update_idletasks()
+    # 分割ツールの画面の真ん中に出す
+    x = root.winfo_rootx() + (root.winfo_width() - dialog.winfo_width()) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - dialog.winfo_height()) // 3
+    dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    dialog.grab_set()
+    dialog.focus_force()
+    entry.focus_set()
+    entry.select_range(0, "end")
+    root.wait_window(dialog)
+    return result["path"]
+
 def convert_text_to_json():
     input_text = text_input.get("1.0", tk.END).strip()
     lines = [line for line in input_text.splitlines() if line.strip()]
@@ -245,7 +312,14 @@ def convert_text_to_json():
     heading = " ".join(line.strip() for line in lines[:first])
     lines = lines[first:]
     if not lines:
-        messagebox.showwarning("警告", "「1.」から始まる行がありません。")
+        messagebox.showwarning("警告", "「1.」の行がありません")
+        return
+
+    # 曲リストを2回貼り付けると、2回目の見出しが曲の行として読まれて分かりにくいエラーになるので、先に知らせる
+    # （行の番号は、空の行を数えない、上からの何行目か）
+    restarts = [first + i + 1 for i, line in enumerate(lines) if re.match(r"^\s*1\.", line)]
+    if len(restarts) > 1:
+        messagebox.showerror("エラー", "「1.」の行が複数あります（" + "・".join(f"{n}行目" for n in restarts) + "）")
         return
 
     final_end = None
@@ -264,13 +338,23 @@ def convert_text_to_json():
             if idx == final_end_line:
                 continue
             parts = line.strip().rsplit(" ", 1)
+            label = f"{first + idx + 1}行目「{line.strip()}」"
+            def stuck_error(token):
+                # 「16. 花になれ1:00:56」のように、曲名と時刻の間にスペースが無い（最後の部分が時刻として読めないときだけ調べる）
+                m = re.search(r"((?:\d{1,2}:)?\d{1,2}:\d{2})$", token)
+                if m and m.start() > 0:
+                    return ValueError(f"{label}\n曲名と時刻の間にスペースがありません")
+                return None
             if len(parts) != 2:
-                raise ValueError(f"無効な行の形式: {line}")
+                raise stuck_error(line.strip()) or ValueError(f"{label}\n時刻がありません")
             title, time_str = parts
-            start_ms = parse_time_to_ms(time_str)
+            try:
+                start_ms = parse_time_to_ms(time_str)
+            except ValueError:
+                raise stuck_error(time_str) or ValueError(f"{label}\n時刻がありません")
             parsed.append((idx, title.strip(), start_ms))
     except ValueError as ve:
-        messagebox.showerror("エラー", f"テキストの形式が正しくありません:\n{ve}")
+        messagebox.showerror("エラー", str(ve))
         return
 
     chapters = []
@@ -293,43 +377,33 @@ def convert_text_to_json():
         if end_ms > start_ms:
             continue
         label = f"・{clean_title(title)}（開始 {format_min_sec(start_ms / 1000)}）"
-        relation = "と同じです" if end_ms == start_ms else "より前です"
-        if i + 1 < len(parsed):
-            reason = f"  次の「{clean_title(parsed[i + 1][1])}」の開始時刻 {format_min_sec(end_ms / 1000)} がこれ{relation}。時刻を確認してください。"
-            if clean_title(title).upper() == "END":
-                reason += "\n  END行は最後の行にだけ書けます。途中のEND行は削除してください。"
-            problems.append(f"{label}\n{reason}")
+        relation = "と同じ" if end_ms == start_ms else "より前"
+        if clean_title(title).upper() == "END":
+            problems.append(f"{label}\n  END行は最後の行だけにしてください")
+        elif i + 1 < len(parsed):
+            problems.append(f"{label}\n  次の曲の時刻が、これ{relation}です")
         elif final_end is None:
-            problems.append(f"{label}\n  最後のチャプターですが、END行が無いため終了時刻が決まりません。\n  末尾に「END 3:03:10」のような行を追加してください。")
+            problems.append(f"{label}\n  最後にEND行がありません")
         else:
-            problems.append(f"{label}\n  END行の時刻 {format_min_sec(final_end / 1000)} がこれ{relation}。")
+            problems.append(f"{label}\n  END行の時刻が、これ{relation}です")
     if problems:
         details = "\n".join(problems)
         log(f"❌ JSONに変換できないチャプターがあります:\n{details}")
-        messagebox.showerror("エラー", f"次のチャプターは終了時刻が開始時刻以前になるため、JSONを保存しませんでした。\n\n{details}")
+        messagebox.showerror("エラー", details)
         return
 
     output = {"chapters": chapters}
 
-    # JSONファイルの保存先を選択
-    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-    # ファイル名に使えない「/」「:」は置き換える
+    # 保存する名前を聞く（見出しがあれば、それを最初に入れておく。ファイル名に使えない「/」「:」は置き換える）
     initial_name = re.sub(r"[/:]", "_", heading).strip() or "chapters"
-    json_path = filedialog.asksaveasfilename(
-        parent=root,
-        title="JSONファイルを保存",
-        initialdir=desktop_path,
-        initialfile=f"{initial_name}.json",
-        defaultextension=".json",
-        filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-    )
+    json_path = ask_json_save_path(initial_name)
 
     if not json_path:
         return
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    messagebox.showinfo("成功", f"JSONを保存しました:\n{os.path.basename(json_path)}")
+    messagebox.showinfo("成功", f"保存しました: {os.path.basename(json_path)}")
     log(f"✅ JSON書き出し成功: {json_path}")
 
 def extract_chapters_from_video():
@@ -380,16 +454,8 @@ def extract_chapters_from_video():
 
             log(f"✅ {len(chapters)}個のチャプターを検出しました")
 
-            # JSONファイルの保存先を選択
-            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-            json_path = filedialog.asksaveasfilename(
-                parent=root,
-                title="JSONファイルを保存",
-                initialdir=desktop_path,
-                initialfile="chapters.json",
-                defaultextension=".json",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-            )
+            # 保存する名前を聞く
+            json_path = ask_json_save_path("chapters")
 
             if not json_path:
                 return
@@ -924,9 +990,14 @@ def merge_undated_tracks(shows):
     if cache is not None:
         save_duration_cache(cache)
 
-def scan_live_albums(roots):
+def entry_kinds(entry):
+    """種類の絞り込みに使う種類（live 以外のアルバムは、まとめて「live 以外」）"""
+    return {"（live 以外）"} if entry.get("plain") else {artist_kind(a) for a in entry["artists"]}
+
+def scan_live_albums(roots, plain_only=False):
     """指定したフォルダの (live rec)・(live audio) のアルバムを読み込み、公演ごとにまとめる
-    （1つのアルバムに何公演分も入っていることがあるため、ファイル名の日付で公演を分ける）"""
+    （1つのアルバムに何公演分も入っていることがあるため、ファイル名の日付で公演を分ける）
+    plain_only のときは、live 以外のアーティストのアルバムだけを、アルバムごとに1行で読み込む"""
     shows = {}
     album_file_counts = collections.Counter()
     for base in roots:
@@ -935,7 +1006,8 @@ def scan_live_albums(roots):
         location = location_label(base)
         for artist in sorted(os.listdir(base)):
             artist_dir = os.path.join(base, artist)
-            if not LIVE_ARTIST_PATTERN.search(artist) or not os.path.isdir(artist_dir):
+            is_live = bool(LIVE_ARTIST_PATTERN.search(artist))
+            if is_live == plain_only or artist.startswith(".") or not os.path.isdir(artist_dir):
                 continue
             for album in sorted(os.listdir(artist_dir)):
                 album_dir = os.path.join(artist_dir, album)
@@ -944,6 +1016,20 @@ def scan_live_albums(roots):
                 files = [n for n in os.listdir(album_dir)
                          if os.path.splitext(n)[1].lower() in AUDIO_EXTENSIONS and not n.startswith("._")]
                 if not files:
+                    continue
+                if not is_live:
+                    # live 以外のアルバム：日付や元データは見ず、Music と Previous の同じアーティスト・同じアルバムを1行にまとめる
+                    album_key = f"plain|{normalize_name(base_artist(artist))}|{normalize_name(album)}"
+                    entry = shows.setdefault(album_key, {"key": album_key, "album_key": album_key, "album": album, "date": "", "title": "", "plain": True,
+                                                         "artists": set(), "folders": [], "names": [], "sources": [], "tracks": 0,
+                                                         "split_times": [], "added_times": [], "source_times": [], "track_paths": []})
+                    entry["artists"].add(artist)
+                    if (location, album_dir) not in entry["folders"]:
+                        entry["folders"].append((location, album_dir))
+                    for n in files:
+                        entry["names"].append(n)
+                        entry["tracks"] += 1
+                        entry["track_paths"].append(os.path.join(album_dir, n))
                     continue
                 # live audio（公式の映像作品などの音源）と live rec（公演の録音）は、アルバム名が同じでも別物なので分ける
                 album_key = normalize_name(album) + ("|audio" if artist_kind(artist) in ("live audio", "full live audio") else "")
@@ -1025,6 +1111,15 @@ def scan_live_albums(roots):
             entry["status"] = "対象外"
         else:
             entry["status"] = "分割済み" if entry["tracks"] else "未分割"
+        if entry.get("plain"):
+            entry["source_type"] = ""
+            entry["status"] = "対象外"
+        # 重複：同じ名前の曲（拡張子違い・Finderの複製で付く「 1」は同じとみなす）が、2つ以上のフォルダにある数
+        where = collections.defaultdict(set)
+        for p in entry["sources"] + entry["track_paths"]:
+            stem = re.sub(r"\s\d+$", "", os.path.splitext(os.path.basename(p))[0])
+            where[normalize_name(stem)].add(os.path.dirname(p))
+        entry["duplicates"] = sum(len(dirs) > 1 for dirs in where.values())
         locations = sorted({loc for loc, _ in entry["folders"]})
         entry["location"] = "複数" if len(locations) > 1 else locations[0]
         # 会場名：その公演の日付が入ったファイル名（元データを優先）、無ければアルバム名から取る
@@ -1113,8 +1208,9 @@ def save_live_notes(notes, path):
         json.dump(notes, f, ensure_ascii=False, indent=2)
 
 # Music のライブラリをまとめて読む（曲の情報と、手元のファイルにつながっている曲の場所）
+# Music が起動していないときは読まない（問い合わせると Music が勝手に起動してしまうため）
 MUSIC_LIBRARY_SCRIPT = """
-function run(){const m=Application('Music');const t=m.libraryPlaylists[0].tracks;
+function run(){const m=Application('Music');if(!m.running())return 'NOT_RUNNING';const t=m.libraryPlaylists[0].tracks;
 const id=t.persistentID(),n=t.name(),al=t.album(),ar=t.artist(),aa=t.albumArtist(),c=t.class(),cs=t.cloudStatus();
 const o=[];for(let i=0;i<id.length;i++)o.push([id[i],n[i],al[i],ar[i],aa[i],c[i],cs[i]]);
 const f=m.libraryPlaylists[0].fileTracks;const fid=f.persistentID(),l=f.location();const loc={};
@@ -1129,10 +1225,12 @@ LIBRARY_RELATIONS = ["ライブラリにある（このファイル）", "ライ
 ICLOUD_STATES = ["アップ済み", "一部だけアップ済み", "アップされていない", "配信の曲", "ライブラリに無い"]
 
 def read_music_library():
-    """Music のライブラリを読む。読めなければ None（Music が無い・許可していないなど）"""
+    """Music のライブラリを読む。Music が起動していなければ "not running"、読めなければ None（許可していないなど）"""
     try:
         out = subprocess.run(["osascript", "-l", "JavaScript", "-e", MUSIC_LIBRARY_SCRIPT],
                              capture_output=True, text=True, timeout=300).stdout
+        if out.strip() == "NOT_RUNNING":
+            return "not running"
         data = json.loads(out)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
@@ -1307,8 +1405,13 @@ def open_live_manager():
     icloud_filter = ttk.Combobox(bar2, values=["すべて"] + ICLOUD_STATES, state="readonly", width=16)
     icloud_filter.set("すべて")
     icloud_filter.pack(side="left", padx=(5, 15))
-    library_label = tk.Label(bar2, text="", fg="#555")
-    library_label.pack(side="left", padx=10)
+    tk.Label(bar2, text="重複").pack(side="left")
+    duplicate_filter = ttk.Combobox(bar2, values=["すべて", "あり", "なし"], state="readonly", width=6)
+    duplicate_filter.set("すべて")
+    duplicate_filter.pack(side="left", padx=(5, 15))
+    # いつもは live rec などだけ。重複を調べたいときだけ、live 以外のアルバムに切り替える
+    plain_only_var = tk.BooleanVar(value=bool(load_settings().get("live_filters", {}).get("plain_only")))
+    tk.Checkbutton(bar2, text="live 以外のアルバムを表示", variable=plain_only_var, command=lambda: reload()).pack(side="left", padx=(0, 15))
     # 状態のタグ（色の見本を兼ね、押すとその状態だけに絞り込む）
     tag_bar = tk.Frame(win)
     tag_bar.pack(fill="x", padx=10, pady=(0, 5))
@@ -1325,9 +1428,11 @@ def open_live_manager():
     count_label.pack(side="right")
     length_label = tk.Label(tag_bar, text="", fg="#555")
     length_label.pack(side="right", padx=10)
+    library_label = tk.Label(tag_bar, text="", fg="#555")
+    library_label.pack(side="right", padx=10)
 
     columns = [("status", "状態", 80), ("date", "公演日", 90), ("venue", "会場・タイトル", 240), ("type", "音源", 45), ("artist", "アーティスト", 150),
-               ("album", "アルバム", 320), ("location", "場所", 90), ("library", "ライブラリ", 200), ("icloud", "iCloud", 110), ("length", "時間", 70), ("exts", "拡張子", 70), ("tracks", "曲数", 45), ("sources", "元データ", 70), ("added_date", "追加日", 90),
+               ("album", "アルバム", 320), ("location", "場所", 90), ("duplicates", "重複", 50), ("library", "ライブラリ", 200), ("icloud", "iCloud", 110), ("length", "時間", 70), ("exts", "拡張子", 70), ("tracks", "曲数", 45), ("sources", "元データ", 70), ("added_date", "追加日", 90),
                ("split_date", "分割日", 90), ("memo", "メモ", 120)]
     frame = tk.Frame(win)
     frame.pack(fill="both", expand=True, padx=10)
@@ -1371,13 +1476,14 @@ def open_live_manager():
                 "sources": f"あり（{len(entry['sources'])}）" if entry["sources"] else "なし",
                 "length": format_clock(entry["length"]) if entry.get("length") else ("…" if entry.get("length") is None else ""),
                 "exts": entry["exts"],
+                "duplicates": f"{entry['duplicates']}曲" if entry["duplicates"] else "",
                 "library": entry.get("library", "…"), "icloud": entry.get("icloud", "…"),
                 "added_date": entry["added_date"], "split_date": entry["split_date"], "memo": notes.get(entry["key"], {}).get("memo", "")}
 
     def save_filters():
         """絞り込みと並べ替えを保存して、画面を閉じても次に開いたときに戻す"""
         settings = load_settings()
-        settings["live_filters"] = {"search": search_var.get(), "sort": list(state["sort"]),
+        settings["live_filters"] = {"search": search_var.get(), "sort": list(state["sort"]), "plain_only": plain_only_var.get(),
                                     **{name: box.get() for name, box in filter_boxes.items()}}
         save_settings(settings)
 
@@ -1391,7 +1497,9 @@ def open_live_manager():
         available_artists = set()
         for entry in state["albums"]:
             values = row_values(entry)
-            if kind_filter.get() != "すべて" and kind_filter.get() not in {artist_kind(a) for a in entry["artists"]}:
+            if kind_filter.get() != "すべて" and kind_filter.get() not in entry_kinds(entry):
+                continue
+            if duplicate_filter.get() != "すべて" and (duplicate_filter.get() == "あり") != bool(entry["duplicates"]):
                 continue
             if year_filter.get() != "すべて" and not values["date"].startswith(year_filter.get()):
                 continue
@@ -1454,7 +1562,7 @@ def open_live_manager():
         count_label.config(text="読み込み中...")
         win.update_idletasks()
         missing = [p for p in state["roots"] if not os.path.isdir(p)]
-        state["albums"] = scan_live_albums(state["roots"])
+        state["albums"] = scan_live_albums(state["roots"], plain_only=plain_only_var.get())
         location_filter["values"] = ["すべて"] + [location_label(p) for p in state["roots"]] + ["複数"]
         if missing:
             # 外付けドライブがつながっていないときと、ほかのMacで初めて開いたとき（この Mac のフォルダが無い）がある
@@ -1462,7 +1570,7 @@ def open_live_manager():
                                    + "\n\n読み込むフォルダを設定し直しますか？", parent=win):
                 win.after(0, edit_folders)
         artist_filter["values"] = ["すべて"] + sorted({base_artist(a) for e in state["albums"] for a in e["artists"]}, key=str.lower)
-        kind_filter["values"] = ["すべて"] + sorted({artist_kind(a) for e in state["albums"] for a in e["artists"]})
+        kind_filter["values"] = ["すべて"] + sorted({k for e in state["albums"] for k in entry_kinds(e)})
         year_filter["values"] = ["すべて"] + sorted({e["date"][:4] for e in state["albums"] if e["date"][:4].isdigit()}, reverse=True)
         ext_filter["values"] = ["すべて"] + sorted({x for e in state["albums"] for x in e["exts"].split(", ") if x})
         # 保存していた絞り込みの値が、もう一覧に無いときは「すべて」に戻す
@@ -1476,8 +1584,9 @@ def open_live_manager():
         start_library_read()
 
     def apply_library(tracks):
-        if tracks is None:
-            library_label.config(text="Music のライブラリを読めませんでした")
+        if tracks is None or tracks == "not running":
+            library_label.config(text="Music が起動していないので、ライブラリは読んでいません（起動してから「再読み込み」）"
+                                 if tracks == "not running" else "Music のライブラリを読めませんでした")
             for entry in state["albums"]:
                 entry["library"] = entry["icloud"] = entry["library_kind"] = ""
                 entry["related"] = []
@@ -1766,7 +1875,7 @@ def open_live_manager():
     # 前回の絞り込みと並べ替えを戻す
     filter_boxes = {"artist": artist_filter, "kind": kind_filter, "year": year_filter, "type": type_filter,
                     "status": status_filter, "location": location_filter, "source": source_filter, "ext": ext_filter,
-                    "library": library_filter, "icloud": icloud_filter}
+                    "library": library_filter, "icloud": icloud_filter, "duplicates": duplicate_filter}
     saved_filters = load_settings().get("live_filters", {})
     for name, box in filter_boxes.items():
         box.set(saved_filters.get(name) or "すべて")
@@ -1784,6 +1893,7 @@ def open_live_manager():
     ext_filter.bind("<<ComboboxSelected>>", refresh_view)
     library_filter.bind("<<ComboboxSelected>>", refresh_view)
     icloud_filter.bind("<<ComboboxSelected>>", refresh_view)
+    duplicate_filter.bind("<<ComboboxSelected>>", refresh_view)
     # 読み込むフォルダをまだ決めていなければ、先にフォルダ設定を出す
     win.after(100, reload if state["roots"] else edit_folders)
 
