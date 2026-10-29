@@ -299,6 +299,29 @@ def ask_json_save_path(initial_name):
     root.wait_window(dialog)
     return result["path"]
 
+def show_saved_and_offer_split(json_path):
+    """「保存しました」を出し、「続けて分割…」で、そのJSONを使って分割を始められるようにする"""
+    dialog = tk.Toplevel(root)
+    dialog.title("成功")
+    dialog.transient(root)
+    dialog.resizable(False, False)
+    tk.Label(dialog, text=f"保存しました: {os.path.basename(json_path)}").pack(padx=20, pady=(18, 10))
+    buttons = tk.Frame(dialog)
+    buttons.pack(padx=15, pady=(0, 15), fill="x")
+    def split_next():
+        dialog.destroy()
+        root.after(100, lambda: split_audio_fast(json_path=json_path))
+    tk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right")
+    tk.Button(buttons, text="続けて分割…", command=split_next, default="active").pack(side="right", padx=5)
+    dialog.bind("<Return>", lambda e: split_next())
+    dialog.bind("<Escape>", lambda e: dialog.destroy())
+    dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - dialog.winfo_width()) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - dialog.winfo_height()) // 3
+    dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    dialog.grab_set()
+    dialog.focus_force()
+
 def convert_text_to_json():
     input_text = text_input.get("1.0", tk.END).strip()
     lines = [line for line in input_text.splitlines() if line.strip()]
@@ -403,8 +426,8 @@ def convert_text_to_json():
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    messagebox.showinfo("成功", f"保存しました: {os.path.basename(json_path)}")
     log(f"✅ JSON書き出し成功: {json_path}")
+    show_saved_and_offer_split(json_path)
 
 def extract_chapters_from_video():
     def run():
@@ -476,18 +499,27 @@ def extract_chapters_from_video():
 
     run()
 
-def split_audio_fast(media_path=None):
+def split_audio_fast(media_path=None, json_path=None):
     # media_pathを渡された場合（ライブ音源の管理画面から呼ばれた場合）はファイル選択を省く
+    # json_pathを渡された場合（JSONを保存した後に「続けて分割」を押した場合）は、そのJSONで分割する
     if media_path is None:
+        # 前回音声ファイルを選んだフォルダから開く（初めて・フォルダが無くなったときは Mac のミュージック）
+        last_dir = load_settings().get("split_media_dir")
+        start_dir = next((d for d in (last_dir, os.path.expanduser("~/Music")) if d and os.path.isdir(d)), None)
         media_path = filedialog.askopenfilename(
             parent=root,
             title="音声ファイルまたは動画ファイルを選択",
+            **({"initialdir": start_dir} if start_dir else {}),
             filetypes=[
                 ("Audio files", "*.m4a *.mp3 *.wav"),
                 ("Video files", "*.mp4 *.mov *.avi *.mkv"),
                 ("All files", "*.*")
             ]
         )
+        if media_path:
+            settings = load_settings()
+            settings["split_media_dir"] = os.path.dirname(media_path)
+            save_settings(settings)
     if not media_path:
         return
 
@@ -498,8 +530,15 @@ def split_audio_fast(media_path=None):
     log(f"📹 選択されたファイル: {media_path}")
     log(f"📋 ファイルタイプ: {'動画' if is_video else '音声'}")
 
+    if json_path:
+        log(f"📄 JSONファイル: {json_path}")
+        with open(json_path, "r", encoding="utf-8") as f:
+            chapters = json.load(f).get("chapters", [])
+        if not chapters:
+            messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+            return
     # 動画ファイルの場合は、動画からチャプター情報を自動抽出
-    if is_video:
+    elif is_video:
         ffprobe_path = get_ffprobe_path()
         log(f"▶ ffprobe path: {ffprobe_path}")
         log("📊 動画からチャプター情報を抽出中...")
