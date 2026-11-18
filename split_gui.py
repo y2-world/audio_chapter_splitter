@@ -499,6 +499,150 @@ def extract_chapters_from_video():
 
     run()
 
+def read_source_metadata(media_path, is_video):
+    """元のファイルから、分割した曲に引き継ぐタグ（アルバム名など）を読む"""
+    media_filename = os.path.splitext(os.path.basename(media_path))[0]
+    ffprobe_path = get_ffprobe_path()
+    # 元のファイルからメタデータを取得
+    metadata = {}
+    try:
+        cmd_metadata = [
+            ffprobe_path, "-i", media_path,
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            "-loglevel", "error"
+        ]
+        process_metadata = subprocess.Popen(
+            cmd_metadata, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
+        )
+        stdout_metadata, stderr_metadata = process_metadata.communicate()
+        if process_metadata.returncode == 0:
+            format_data = json.loads(stdout_metadata)
+
+            # formatタグとストリームタグの両方を確認
+            all_tags = {}
+            format_tags = format_data.get("format", {}).get("tags", {})
+            all_tags.update(format_tags)
+
+            # ストリームタグも確認（特に音声ストリーム）
+            streams = format_data.get("streams", [])
+            for stream in streams:
+                if stream.get("codec_type") == "audio":
+                    stream_tags = stream.get("tags", {})
+                    all_tags.update(stream_tags)
+                    break
+
+            log(f"🔍 検出されたメタデータタグ: {list(all_tags.keys())}")
+
+            # 継承するメタデータのマッピング定義
+            metadata_mapping = {
+                "album": ["album", "ALBUM", "Album", "©alb"],
+                "artist": ["artist", "ARTIST", "Artist", "©ART", "album_artist", "ALBUM_ARTIST"],
+                "album_artist": ["album_artist", "ALBUM_ARTIST", "albumartist"],
+                "genre": ["genre", "GENRE", "Genre", "©gen"],
+                "date": ["date", "DATE", "Date", "year", "YEAR", "©day"],
+                "composer": ["composer", "COMPOSER", "Composer", "©wrt"],
+                "comment": ["comment", "COMMENT", "Comment", "©cmt"],
+                "copyright": ["copyright", "COPYRIGHT", "Copyright", "©cpy"],
+                "publisher": ["publisher", "PUBLISHER", "Publisher", "label"],
+                "description": ["description", "DESCRIPTION", "Description"],
+            }
+
+            # 各メタデータを検索して取得
+            for meta_key, possible_keys in metadata_mapping.items():
+                for key in possible_keys:
+                    if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
+                        metadata[meta_key] = str(all_tags[key]).strip()
+                        log(f"  📌 {meta_key}: {metadata[meta_key]}")
+                        break
+
+            # 動画ファイルの場合、元のファイルのタイトルをアルバムタイトルとして設定
+            if is_video:
+                # 動画のタイトルタグを取得
+                video_title = None
+                for key in ["title", "TITLE", "Title", "©nam"]:
+                    if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
+                        video_title = str(all_tags[key]).strip()
+                        break
+
+                # タイトルが見つかった場合、それをアルバムタイトルとして設定
+                if video_title:
+                    metadata["album"] = video_title
+                    log(f"  🎬 動画タイトルをアルバムに設定: {video_title}")
+                # タイトルタグがない場合はファイル名をアルバムタイトルとして使用
+                else:
+                    metadata["album"] = media_filename
+                    log(f"  📁 ファイル名をアルバムに設定: {media_filename}")
+
+            if metadata:
+                log(f"📋 継承するメタデータ: {list(metadata.keys())}")
+            else:
+                log(f"⚠️ メタデータが見つかりませんでした")
+    except Exception as e:
+        log(f"⚠️ メタデータの取得に失敗（継続します）: {e}")
+    return metadata
+
+# 分割前に変えられるタグ（画面に出す順）。ここに無いタグ（著作権など）は元のファイルのまま引き継ぐ
+EDITABLE_TAGS = [
+    ("album", "アルバム"),
+    ("artist", "アーティスト"),
+    ("album_artist", "アルバムアーティスト"),
+    ("genre", "ジャンル"),
+    ("date", "年"),
+    ("composer", "作曲者"),
+    ("comment", "コメント"),
+]
+
+def ask_tag_overrides(metadata, media_path):
+    """分割した曲に付けるタグを、分割の前に変えられる画面を出す。
+    変えたタグを返す（空にした項目は付けない）。キャンセルしたときは None"""
+    result = {"metadata": None}
+    dialog = tk.Toplevel(root)
+    dialog.title("タグ情報")
+    dialog.transient(root)
+    dialog.resizable(True, False)
+    tk.Label(dialog, text=f"分割した曲に付けるタグ（元のファイル: {os.path.basename(media_path)}）").pack(padx=15, pady=(15, 2), anchor="w")
+    tk.Label(dialog, text="曲名とトラック番号はチャプターから付けます。空にした項目は付けません。", fg="#555").pack(padx=15, pady=(0, 8), anchor="w")
+    form = tk.Frame(dialog)
+    form.pack(padx=15, fill="x")
+    form.columnconfigure(1, weight=1)
+    tag_vars = {}
+    for row, (key, label) in enumerate(EDITABLE_TAGS):
+        tk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=2, padx=(0, 8))
+        tag_vars[key] = tk.StringVar(value=metadata.get(key, ""))
+        entry = tk.Entry(form, textvariable=tag_vars[key], width=50)
+        entry.grid(row=row, column=1, sticky="ew", pady=2)
+        if row == 0:
+            first_entry = entry
+
+    def start(_=None):
+        edited = dict(metadata)
+        for key, var in tag_vars.items():
+            value = var.get().strip()
+            if value:
+                edited[key] = value
+            else:
+                edited.pop(key, None)
+        result["metadata"] = edited
+        dialog.destroy()
+
+    buttons = tk.Frame(dialog)
+    buttons.pack(padx=15, pady=15, fill="x")
+    tk.Button(buttons, text="分割する", command=start, default="active").pack(side="right")
+    tk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side="right", padx=5)
+    dialog.bind("<Return>", start)
+    dialog.bind("<Escape>", lambda e: dialog.destroy())
+    dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - dialog.winfo_width()) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - dialog.winfo_height()) // 3
+    dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    dialog.grab_set()
+    dialog.focus_force()
+    first_entry.focus_set()
+    root.wait_window(dialog)
+    return result["metadata"]
+
 def split_audio_fast(media_path=None, json_path=None):
     # media_pathを渡された場合（ライブ音源の管理画面から呼ばれた場合）はファイル選択を省く
     # json_pathを渡された場合（JSONを保存した後に「続けて分割」を押した場合）は、そのJSONで分割する
@@ -644,97 +788,29 @@ def split_audio_fast(media_path=None, json_path=None):
         )
         return
 
+    # 分割した曲に引き継ぐタグを読み、「タグ情報を変更する」がオンなら、変える画面を出す
+    metadata = read_source_metadata(media_path, is_video)
+    if edit_tags_var.get():
+        metadata = ask_tag_overrides(metadata, media_path)
+        if metadata is None:
+            log("❌ 分割をキャンセルしました")
+            return
+        log("✏️ 付けるタグ: " + ", ".join(f"{k}={v}" for k, v in metadata.items()))
+
     # ここから先の分割処理は時間がかかるため作業用スレッドで実行する
     # （ファイル選択などのダイアログは作業用スレッドから開くと固まることがあるため、ここまではメインスレッドで行う）
     def process():
         media_filename = os.path.splitext(os.path.basename(media_path))[0]
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        output_dir = os.path.join(desktop_path, media_filename)
+        # 出力先のフォルダ名はアルバム名（タグ情報を変更したときは変更後の名前）。アルバム名が無ければ元のファイル名
+        # （フォルダ名に使えない「/」「:」は「_」にする）
+        folder_name = re.sub(r"[/:]", "_", metadata.get("album", "")).strip() or media_filename
+        output_dir = os.path.join(desktop_path, folder_name)
         os.makedirs(output_dir, exist_ok=True)
         log(f"💾 出力先: {output_dir}")
 
         ffmpeg_path = get_ffmpeg_path()
-        ffprobe_path = get_ffprobe_path()
         log(f"▶ ffmpeg path: {ffmpeg_path}")
-
-        # 元のファイルからメタデータを取得
-        metadata = {}
-        try:
-            cmd_metadata = [
-                ffprobe_path, "-i", media_path,
-                "-print_format", "json",
-                "-show_format",
-                "-show_streams",
-                "-loglevel", "error"
-            ]
-            process_metadata = subprocess.Popen(
-                cmd_metadata, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace'
-            )
-            stdout_metadata, stderr_metadata = process_metadata.communicate()
-            if process_metadata.returncode == 0:
-                format_data = json.loads(stdout_metadata)
-
-                # formatタグとストリームタグの両方を確認
-                all_tags = {}
-                format_tags = format_data.get("format", {}).get("tags", {})
-                all_tags.update(format_tags)
-
-                # ストリームタグも確認（特に音声ストリーム）
-                streams = format_data.get("streams", [])
-                for stream in streams:
-                    if stream.get("codec_type") == "audio":
-                        stream_tags = stream.get("tags", {})
-                        all_tags.update(stream_tags)
-                        break
-
-                log(f"🔍 検出されたメタデータタグ: {list(all_tags.keys())}")
-
-                # 継承するメタデータのマッピング定義
-                metadata_mapping = {
-                    "album": ["album", "ALBUM", "Album", "©alb"],
-                    "artist": ["artist", "ARTIST", "Artist", "©ART", "album_artist", "ALBUM_ARTIST"],
-                    "album_artist": ["album_artist", "ALBUM_ARTIST", "albumartist"],
-                    "genre": ["genre", "GENRE", "Genre", "©gen"],
-                    "date": ["date", "DATE", "Date", "year", "YEAR", "©day"],
-                    "composer": ["composer", "COMPOSER", "Composer", "©wrt"],
-                    "comment": ["comment", "COMMENT", "Comment", "©cmt"],
-                    "copyright": ["copyright", "COPYRIGHT", "Copyright", "©cpy"],
-                    "publisher": ["publisher", "PUBLISHER", "Publisher", "label"],
-                    "description": ["description", "DESCRIPTION", "Description"],
-                }
-
-                # 各メタデータを検索して取得
-                for meta_key, possible_keys in metadata_mapping.items():
-                    for key in possible_keys:
-                        if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
-                            metadata[meta_key] = str(all_tags[key]).strip()
-                            log(f"  📌 {meta_key}: {metadata[meta_key]}")
-                            break
-
-                # 動画ファイルの場合、元のファイルのタイトルをアルバムタイトルとして設定
-                if is_video:
-                    # 動画のタイトルタグを取得
-                    video_title = None
-                    for key in ["title", "TITLE", "Title", "©nam"]:
-                        if key in all_tags and all_tags[key] and str(all_tags[key]).strip():
-                            video_title = str(all_tags[key]).strip()
-                            break
-
-                    # タイトルが見つかった場合、それをアルバムタイトルとして設定
-                    if video_title:
-                        metadata["album"] = video_title
-                        log(f"  🎬 動画タイトルをアルバムに設定: {video_title}")
-                    # タイトルタグがない場合はファイル名をアルバムタイトルとして使用
-                    else:
-                        metadata["album"] = media_filename
-                        log(f"  📁 ファイル名をアルバムに設定: {media_filename}")
-
-                if metadata:
-                    log(f"📋 継承するメタデータ: {list(metadata.keys())}")
-                else:
-                    log(f"⚠️ メタデータが見つかりませんでした")
-        except Exception as e:
-            log(f"⚠️ メタデータの取得に失敗（継続します）: {e}")
 
         # 出力ファイルのリストを保存（音声ファイルの場合、後でアートワークを追加）
         output_files = []
@@ -1944,6 +2020,15 @@ btn_extract.pack(fill="x", padx=10, pady=5)
 
 btn_split = tk.Button(root, text="🎬 動画/音声 → 分割", command=split_audio_fast)
 btn_split.pack(fill="x", padx=10, pady=5)
+
+# オンのときは、分割を始める前にアルバム名などのタグを変える画面を出す（次に起動したときも覚えておく）
+edit_tags_var = tk.BooleanVar(value=bool(load_settings().get("edit_tags_before_split")))
+def save_edit_tags_setting():
+    settings = load_settings()
+    settings["edit_tags_before_split"] = edit_tags_var.get()
+    save_settings(settings)
+tk.Checkbutton(root, text="タグ情報を変更する", variable=edit_tags_var,
+               command=save_edit_tags_setting).pack(padx=10, pady=(5, 0), anchor="w", before=btn_convert)  # ボタンの並びの一番上に出す
 
 btn_stop = tk.Button(root, text="⛔ 処理を中断", command=stop_processing)
 btn_stop.pack(fill="x", padx=10, pady=5)
