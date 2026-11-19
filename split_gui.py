@@ -499,6 +499,142 @@ def extract_chapters_from_video():
 
     run()
 
+# チャプターを書き込める動画（QuickTime方式のチャプターが入る形式）
+CHAPTER_VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov")
+
+def ffmetadata_escape(text):
+    """ffmpegのチャプター情報ファイルで特別な意味を持つ文字を、そのまま書けるようにする"""
+    return re.sub(r"([=;#\\\n])", r"\\\1", text)
+
+def chapters_to_ffmetadata(chapters):
+    """JSONのチャプターを、ffmpegのチャプター情報ファイルの中身にする"""
+    lines = [";FFMETADATA1"]
+    for chapter in chapters:
+        start_ms = round(float(chapter["start_time"]) * 1000)
+        end_ms = round(float(chapter["end_time"]) * 1000)
+        title = chapter.get("tags", {}).get("title", "chapter")
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={start_ms}", f"END={end_ms}", f"title={ffmetadata_escape(title)}"]
+    return "\n".join(lines) + "\n"
+
+def write_chapters_to_video(video_path, chapters):
+    """元の動画にチャプターを書き込む（作業用スレッドから呼ぶ）。(うまくいったか, 結果の説明) を返す
+    一時ファイルに書き出して、長さ・チャプターの数・開始時刻を確認してから元の動画と入れ替える。合わなければ元の動画は変えない"""
+    folder, name = os.path.split(video_path)
+    stem, ext = os.path.splitext(name)
+    # 一時ファイルは元の動画と同じフォルダに作る（同じドライブなら、最後の入れ替えが一瞬で済む）
+    temp_path = os.path.join(folder, f".{stem}.chapters-temp{ext}")
+    meta_path = os.path.join(APP_SUPPORT_DIR, "chapters.ffmeta")
+    try:
+        os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write(chapters_to_ffmetadata(chapters))
+
+        call_on_main(current_label.config, text=f"チャプターを書き込み中: {name}")
+        log(f"🎞️ 動画にチャプターを書き込み中: {video_path}")
+        cmd = [
+            get_ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", video_path,
+            "-f", "ffmetadata", "-i", meta_path,
+            "-map", "0", "-map", "-0:d",   # 映像・音声・アートワークはそのまま。古いチャプタートラックは外す
+            "-c", "copy",
+            "-map_metadata", "0",          # タイトルなどのタグは元の動画のまま
+            "-map_chapters", "1",
+            "-movflags", "+disable_chpl",  # 既存の動画と同じく、QuickTime方式のチャプターだけにする
+            # チャプタートラックの時間の単位を1/1000秒にする（ffmpeg 9 は映像・音声・アートワークから大きな単位を自動で決めるため、
+            # 長いチャプターの長さがあふれて、チャプターがいくつか消えてしまう）
+            "-movie_timescale", "1000",
+            temp_path
+        ]
+        started = time.time()
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace")
+        output = [l for l in result.stdout.splitlines() if l.strip()]
+        if result.returncode != 0:
+            log(f"❌ ffmpegがエラーコード{result.returncode}で終了しました")
+            for l in output[-5:]:
+                log(f"   {l}")
+            return False, f"{name}\nにチャプターを書き込めませんでした。\n\n原因: {explain_ffmpeg_error(output)}\n\n元の動画は変わっていません。"
+
+        # 入れ替える前に、長さ・チャプターの数・開始時刻が合っているか確認する
+        def probe(path):
+            r = subprocess.run([get_ffprobe_path(), "-v", "error", "-print_format", "json", "-show_format", "-show_chapters", path],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+            data = json.loads(r.stdout or "{}")
+            return float(data.get("format", {}).get("duration", 0)), data.get("chapters", [])
+        original_duration, _ = probe(video_path)
+        new_duration, new_chapters = probe(temp_path)
+        expected_starts = [round(float(c["start_time"]) * 1000) / 1000 for c in chapters]
+        starts_match = len(new_chapters) == len(chapters) and all(
+            abs(float(c["start_time"]) - s) <= 0.01 for c, s in zip(new_chapters, expected_starts))
+        if not starts_match or abs(new_duration - original_duration) > 1:
+            log(f"❌ 確認で合いませんでした（長さ {format_clock(original_duration)} → {format_clock(new_duration)}、チャプター {len(new_chapters)}/{len(chapters)}個）")
+            return False, f"{name}\nに書き込んだ結果を確認したところ、長さかチャプターが合いませんでした。\n\n元の動画は変わっていません。"
+
+        os.replace(temp_path, video_path)
+        log(f"✅ {len(chapters)}個のチャプターを書き込みました（{format_elapsed(time.time() - started)}）: {video_path}")
+        return True, f"{name}\nに{len(chapters)}個のチャプターを書き込みました。"
+    except Exception as e:
+        log(f"❌ エラー: {e}")
+        return False, f"{name}\nにチャプターを書き込めませんでした:\n{e}\n\n元の動画は変わっていません。"
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+def add_chapters_to_video():
+    """JSONのチャプターを、元の動画に書き込む（映像・音声はコピーするだけで作り直さない）
+    HandBrake で作った動画と同じ、QuickTime方式のチャプタートラックだけを入れる（Nero方式の chpl は入れない）"""
+    video_path = filedialog.askopenfilename(
+        parent=root,
+        title="チャプターを付ける動画を選択",
+        filetypes=[("Video files", "*.mp4 *.m4v *.mov"), ("All files", "*.*")]
+    )
+    if not video_path:
+        return
+    if not video_path.lower().endswith(CHAPTER_VIDEO_EXTENSIONS):
+        messagebox.showerror("エラー", "チャプターを付けられるのは mp4・m4v・mov の動画だけです。")
+        return
+    json_path = filedialog.askopenfilename(
+        parent=root,
+        title="チャプターJSONファイルを選択",
+        filetypes=[("JSON files", "*.json")],
+        initialdir=os.path.join(os.path.expanduser("~"), "Desktop")
+    )
+    if not json_path:
+        return
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            chapters = json.load(f).get("chapters", [])
+    except json.JSONDecodeError as e:
+        messagebox.showerror("エラー", f"JSONファイルの形式が正しくありません:\n{os.path.basename(json_path)}\n\n{e.lineno}行目 {e.colno}文字目: {e.msg}")
+        return
+    if not chapters:
+        messagebox.showerror("エラー", "JSONファイルにチャプター情報が含まれていません。")
+        return
+    problems = find_invalid_chapters(chapters)
+    if problems:
+        messagebox.showerror("チャプター情報のエラー",
+                             "次のチャプターは終了時刻が開始時刻以前になっているため、書き込めません。\n\n" + "\n".join(problems))
+        return
+    if not messagebox.askyesno(
+            "動画にチャプターを付ける",
+            f"{os.path.basename(video_path)}\nに、{len(chapters)}個のチャプターを書き込みます。\n\n"
+            "・元の動画に書き込みます（映像と音声はそのまま）\n"
+            "・動画にもともとチャプターがあれば、JSONの内容で置き換わります\n"
+            "・作業中だけ、動画1本分の空き容量が必要です"):
+        return
+
+    log(f"📹 動画ファイル: {video_path}")
+    log(f"📄 JSONファイル: {json_path}")
+
+    def process():
+        ok, message = write_chapters_to_video(video_path, chapters)
+        if ok:
+            main_messagebox.showinfo("完了", message)
+        else:
+            main_messagebox.showerror("エラー", message)
+        call_on_main(current_label.config, text="現在のチャプター: 未処理")
+
+    threading.Thread(target=process).start()
+
 def read_source_metadata(media_path, is_video):
     """元のファイルから、分割した曲に引き継ぐタグ（アルバム名など）を読む"""
     media_filename = os.path.splitext(os.path.basename(media_path))[0]
@@ -674,6 +810,9 @@ def split_audio_fast(media_path=None, json_path=None):
     log(f"📹 選択されたファイル: {media_path}")
     log(f"📋 ファイルタイプ: {'動画' if is_video else '音声'}")
 
+    # チャプターを動画そのものから読んだときは、動画にはもうチャプターがあるので書き込まない
+    chapters_from_video = False
+
     if json_path:
         log(f"📄 JSONファイル: {json_path}")
         with open(json_path, "r", encoding="utf-8") as f:
@@ -741,6 +880,7 @@ def split_audio_fast(media_path=None, json_path=None):
                     return
             else:
                 log(f"✅ {len(chapters)}個のチャプターを検出しました")
+                chapters_from_video = True
 
         except json.JSONDecodeError as e:
             messagebox.showerror("エラー", f"JSONの解析に失敗しました:\n{e}")
@@ -796,6 +936,15 @@ def split_audio_fast(media_path=None, json_path=None):
             log("❌ 分割をキャンセルしました")
             return
         log("✏️ 付けるタグ: " + ", ".join(f"{k}={v}" for k, v in metadata.items()))
+
+    # 「動画にもチャプターを付ける」がオンで、動画（mp4・m4v・mov）をJSONのチャプターで分割するときは、分割のあとで元の動画にも書き込む
+    add_video_chapters = False
+    if add_video_chapters_var.get() and is_video and not chapters_from_video:
+        if media_path.lower().endswith(CHAPTER_VIDEO_EXTENSIONS):
+            add_video_chapters = True
+            log("🎞️ 分割のあと、元の動画にもチャプターを書き込みます")
+        else:
+            log("⚠️ この形式の動画にはチャプターを書き込めないので、分割だけします（チャプターを付けられるのは mp4・m4v・mov）")
 
     # ここから先の分割処理は時間がかかるため作業用スレッドで実行する
     # （ファイル選択などのダイアログは作業用スレッドから開くと固まることがあるため、ここまではメインスレッドで行う）
@@ -977,7 +1126,16 @@ def split_audio_fast(media_path=None, json_path=None):
 
         # 合計時間は完了ダイアログを出す前に計算する（OKを押すまでの時間を含めないため）
         log(f"分割完了 (合計 {format_elapsed(time.time() - split_started)})")
-        main_messagebox.showinfo("完了", "チャプター分割が完了しました。")
+
+        # 「動画にもチャプターを付ける」がオンなら、分割に使ったチャプターを元の動画にも書き込む
+        if add_video_chapters:
+            ok, message = write_chapters_to_video(media_path, chapters)
+            if ok:
+                main_messagebox.showinfo("完了", "チャプター分割が完了しました。\n\n" + message)
+            else:
+                main_messagebox.showerror("完了（動画へのチャプターは失敗）", "チャプター分割は完了しました。\n\n" + message)
+        else:
+            main_messagebox.showinfo("完了", "チャプター分割が完了しました。")
         current_label.config(text="すべて完了")
         progress_var.set(0)
 
@@ -2018,6 +2176,9 @@ btn_convert.pack(fill="x", padx=10, pady=5)
 btn_extract = tk.Button(root, text="🎬 動画からチャプター抽出", command=extract_chapters_from_video)
 btn_extract.pack(fill="x", padx=10, pady=5)
 
+btn_add_chapters = tk.Button(root, text="🎞️ 動画にチャプターを付ける", command=add_chapters_to_video)
+btn_add_chapters.pack(fill="x", padx=10, pady=5)
+
 btn_split = tk.Button(root, text="🎬 動画/音声 → 分割", command=split_audio_fast)
 btn_split.pack(fill="x", padx=10, pady=5)
 
@@ -2027,8 +2188,21 @@ def save_edit_tags_setting():
     settings = load_settings()
     settings["edit_tags_before_split"] = edit_tags_var.get()
     save_settings(settings)
-tk.Checkbutton(root, text="タグ情報を変更する", variable=edit_tags_var,
-               command=save_edit_tags_setting).pack(padx=10, pady=(5, 0), anchor="w", before=btn_convert)  # ボタンの並びの一番上に出す
+
+# オンのときは、動画をJSONのチャプターで分割したあと、元の動画にも同じチャプターを書き込む（次に起動したときも覚えておく）
+add_video_chapters_var = tk.BooleanVar(value=bool(load_settings().get("add_video_chapters_on_split", True)))  # 初めはオン
+def save_add_video_chapters_setting():
+    settings = load_settings()
+    settings["add_video_chapters_on_split"] = add_video_chapters_var.get()
+    save_settings(settings)
+
+# 分割のオプションのチェックは、ボタンの並びの一番上に横1列で並べる
+options_row = tk.Frame(root)
+options_row.pack(padx=10, pady=(5, 0), fill="x", before=btn_convert)
+tk.Checkbutton(options_row, text="タグ情報を変更する", variable=edit_tags_var,
+               command=save_edit_tags_setting).pack(side="left")
+tk.Checkbutton(options_row, text="元動画にもチャプターを付ける", variable=add_video_chapters_var,
+               command=save_add_video_chapters_setting).pack(side="left", padx=(15, 0))
 
 btn_stop = tk.Button(root, text="⛔ 処理を中断", command=stop_processing)
 btn_stop.pack(fill="x", padx=10, pady=5)
