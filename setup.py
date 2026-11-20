@@ -28,8 +28,8 @@ OPTIONS = {
         'CFBundleIdentifier': "com.audiochaptersplitter.app",
         # 実行ファイルの名前が日本語だと codesign が見つけられず署名が壊れる（他のMacで「壊れている」と出る）ので英字にする
         'CFBundleExecutable': "ChapterSplitter",
-        'CFBundleVersion': "1.0.16",
-        'CFBundleShortVersionString': "1.0.16",
+        'CFBundleVersion': "1.0.17",
+        'CFBundleShortVersionString': "1.0.17",
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '15.0',
         'NSAppearance': 'NSAppearanceNameAqua',

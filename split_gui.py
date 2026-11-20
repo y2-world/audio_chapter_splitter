@@ -519,6 +519,11 @@ def chapters_to_ffmetadata(chapters):
 def write_chapters_to_video(video_path, chapters):
     """元の動画にチャプターを書き込む（作業用スレッドから呼ぶ）。(うまくいったか, 結果の説明) を返す
     一時ファイルに書き出して、長さ・チャプターの数・開始時刻を確認してから元の動画と入れ替える。合わなければ元の動画は変えない"""
+    # QuickTime方式のチャプターは必ず0秒から始まるので、最初のチャプターが途中から始まるJSONは、
+    # 0秒から最初のチャプターまでを「Chapter 1」として先頭に足す（最初のチャプターの開始時刻は変えない）
+    if chapters and float(chapters[0]["start_time"]) > 0:
+        first_start = chapters[0]["start_time"]
+        chapters = [{"start_time": "0.000000", "end_time": first_start, "tags": {"title": "Chapter 1"}}] + list(chapters)
     folder, name = os.path.split(video_path)
     stem, ext = os.path.splitext(name)
     # 一時ファイルは元の動画と同じフォルダに作る（同じドライブなら、最後の入れ替えが一瞬で済む）
